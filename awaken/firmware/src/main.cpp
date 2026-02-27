@@ -1,6 +1,6 @@
 /**
  * @file main.cpp
- * @brief Firmware for an ESP32-S3 TFT Feather based alarm clock with haptic feedback.
+ * @brief Multi-target firmware for Awaken alarm hardware.
  */
 #include <WiFi.h>
 #include <NTPClient.h>
@@ -10,27 +10,46 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include <SPI.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_ST7789.h>
-#include <Fonts/FreeSansBold24pt7b.h>
-#include <Fonts/FreeSansBold18pt7b.h>
-#include <Fonts/FreeSans12pt7b.h>
-#include <Fonts/FreeSans9pt7b.h>
 #include <Wire.h>
 #include <Adafruit_DRV2605.h>
 #include <driver/i2s.h>
 #include <math.h>
 #include <SPIFFS.h>
 
-// --- Display (ESP32-S3 TFT Feather built-in 240x135 ST7789) ---
+// --- Board profile ---
+#if defined(TARGET_BOARD_ESP32_WROOM_32E)
+#define BOARD_NAME "ESP32-WROOM-32E"
+#define HAS_TFT_DISPLAY 0
+#define HW_I2C_SDA 21
+#define HW_I2C_SCL 22
+#define I2S_BCLK   26
+#define I2S_LRC    27
+#define I2S_DOUT   25
+#else
+#define BOARD_NAME "Adafruit Feather ESP32-S3 TFT"
+#define HAS_TFT_DISPLAY 1
+#define HW_I2C_SDA 42
+#define HW_I2C_SCL 41
+#define I2S_BCLK   5
+#define I2S_LRC    6
+#define I2S_DOUT   9
 #define TFT_CS        7
 #define TFT_DC       39
 #define TFT_RST      40
 #define TFT_MOSI     35
 #define TFT_SCLK     36
 #define TFT_BACKLIGHT 45
+#endif
 
+#if HAS_TFT_DISPLAY
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <Fonts/FreeSansBold24pt7b.h>
+#include <Fonts/FreeSansBold18pt7b.h>
+#include <Fonts/FreeSans12pt7b.h>
+#include <Fonts/FreeSans9pt7b.h>
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST);
+#endif
 
 // --- Haptic Motor (DRV2605L via STEMMA QT I2C) ---
 Adafruit_DRV2605 drv;
@@ -38,9 +57,6 @@ uint8_t vibrationIntensity = 64;
 uint8_t wakeEffectId = 1; // Default: Strong Click
 
 // --- Audio (MAX98357A I2S amp) ---
-#define I2S_BCLK   5
-#define I2S_LRC    6
-#define I2S_DOUT   9
 #define I2S_PORT   I2S_NUM_0
 #define SAMPLE_RATE 8000
 #define SINE_TABLE_SIZE 256
@@ -119,12 +135,14 @@ unsigned long alarmStartTime = 0;
 unsigned long lastAlarmPulse = 0;
 bool wifiConnected = false;
 
+#if HAS_TFT_DISPLAY
 // --- Display State Tracking ---
 uint8_t displayMode = 0;       // 0=normal, 1=alarm
 uint8_t prevDisplayMode = 255; // Force initial clear
 String prevTimeStr = "";
 String prevStatusStr = "";
 bool flashToggle = false;
+#endif
 
 // Forward declarations
 void stopAlarm();
@@ -420,6 +438,7 @@ void triggerAlarm() {
 
 // --- Display ---
 
+#if HAS_TFT_DISPLAY
 // Returns x cursor for horizontally centering text on 240px display.
 // Must be called AFTER setFont() and setTextSize().
 int16_t centerTextX(const char* text) {
@@ -554,6 +573,9 @@ void updateDisplay() {
         }
     }
 }
+#else
+void updateDisplay() {}
+#endif
 
 // --- Wi-Fi ---
 
@@ -571,6 +593,7 @@ void connectToWiFi() {
         Serial.print("WiFi status: ");
         Serial.println(WiFi.status());
 
+#if HAS_TFT_DISPLAY
         tft.fillScreen(ST77XX_BLACK);
         tft.setFont(&FreeSans12pt7b);
         tft.setTextSize(1);
@@ -587,6 +610,7 @@ void connectToWiFi() {
         tft.setCursor(px, 90);
         tft.setTextColor(0x8410); // grey
         tft.print(progBuf);
+#endif
     }
 
     if (WiFi.status() == WL_CONNECTED) {
@@ -750,8 +774,11 @@ void playAlarmAudioFromFile(const char* filePath) {
 
 void setup() {
     Serial.begin(115200);
+    Serial.print("Booting Awaken firmware for ");
+    Serial.println(BOARD_NAME);
 
     // --- Display ---
+#if HAS_TFT_DISPLAY
     pinMode(TFT_BACKLIGHT, OUTPUT);
     digitalWrite(TFT_BACKLIGHT, HIGH);
     tft.init(135, 240);
@@ -764,8 +791,15 @@ void setup() {
     int16_t sx = centerTextX(splashText);
     tft.setCursor(sx, 80);
     tft.print(splashText);
+#endif
 
-    // --- DRV2605L (via STEMMA QT, I2C SDA=42 SCL=41) ---
+    Wire.begin(HW_I2C_SDA, HW_I2C_SCL);
+    Serial.print("I2C configured: SDA=");
+    Serial.print(HW_I2C_SDA);
+    Serial.print(" SCL=");
+    Serial.println(HW_I2C_SCL);
+
+    // --- DRV2605L ---
     Serial.println("Initializing DRV2605L...");
     if (drv.begin()) {
         drv.selectLibrary(1);
@@ -796,7 +830,7 @@ void setup() {
     }
 
     // --- BLE ---
-    BLEDevice::init("MyAwakenAlarm");
+    BLEDevice::init("Awaken-Control");
     BLEServer *pServer = BLEDevice::createServer();
     pServer->setCallbacks(new MyServerCallbacks());
     BLEService *pService = pServer->createService(BLEUUID(SERVICE_UUID), 30);
@@ -859,7 +893,9 @@ void setup() {
     pAdvertising->start();
     Serial.println("BLE Server started. Waiting for a client to connect...");
 
+#if HAS_TFT_DISPLAY
     tft.fillScreen(ST77XX_BLACK);
+#endif
 }
 
 // --- Main Loop ---
