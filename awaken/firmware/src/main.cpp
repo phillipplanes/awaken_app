@@ -156,6 +156,7 @@ bool uploadedVoiceReady = false;
 bool voiceUploadActive = false;
 uint32_t uploadedVoiceExpectedBytes = 0;
 uint32_t uploadedVoiceReceivedBytes = 0;
+uint32_t uploadedVoiceSampleRate = 0;
 File uploadedVoiceHandle;
 
 // --- Alarm State ---
@@ -393,6 +394,7 @@ class VoiceUploadCallback: public BLECharacteristicCallbacks {
             if (uploadedVoiceHandle) uploadedVoiceHandle.close();
             uploadedVoiceExpectedBytes = 0;
             uploadedVoiceReceivedBytes = 0;
+            uploadedVoiceSampleRate = 0;
             uploadedVoiceReady = false;
             voiceUploadActive = false;
 
@@ -403,6 +405,13 @@ class VoiceUploadCallback: public BLECharacteristicCallbacks {
                     ((uint32_t)(uint8_t)value[3] << 16) |
                     ((uint32_t)(uint8_t)value[4] << 24);
             }
+            if (value.length() >= 9) {
+                uploadedVoiceSampleRate =
+                    ((uint32_t)(uint8_t)value[5]) |
+                    ((uint32_t)(uint8_t)value[6] << 8) |
+                    ((uint32_t)(uint8_t)value[7] << 16) |
+                    ((uint32_t)(uint8_t)value[8] << 24);
+            }
 
             uploadedVoiceHandle = SPIFFS.open(uploadedVoiceFile, "w");
             if (!uploadedVoiceHandle) {
@@ -412,7 +421,9 @@ class VoiceUploadCallback: public BLECharacteristicCallbacks {
 
             voiceUploadActive = true;
             Serial.print("Voice upload started, expected bytes=");
-            Serial.println(uploadedVoiceExpectedBytes);
+            Serial.print(uploadedVoiceExpectedBytes);
+            Serial.print(" sampleRate=");
+            Serial.println(uploadedVoiceSampleRate);
             return;
         }
 
@@ -989,10 +1000,25 @@ void playAlarmAudioFromFile(const char* filePath) {
 
     if (!i2sInitialized || speakerVolume == 0) return;
 
+    // If playing uploaded voice with a known sample rate, reconfigure I2S
+    bool isUploadedVoice = (strcmp(filePath, uploadedVoiceFile) == 0);
+    uint32_t playbackRate = SAMPLE_RATE;
+    if (isUploadedVoice && uploadedVoiceSampleRate > 0) {
+        playbackRate = uploadedVoiceSampleRate;
+    }
+    if (playbackRate != SAMPLE_RATE) {
+        i2s_set_sample_rates(I2S_PORT, playbackRate);
+        Serial.print("I2S sample rate set to ");
+        Serial.println(playbackRate);
+    }
+
     File f = SPIFFS.open(filePath, "r");
     if (!f) {
         Serial.print("Failed to open audio file: ");
         Serial.println(filePath);
+        if (playbackRate != SAMPLE_RATE) {
+            i2s_set_sample_rates(I2S_PORT, SAMPLE_RATE);
+        }
         return;
     }
     Serial.print("File opened, size=");
@@ -1045,6 +1071,11 @@ void playAlarmAudioFromFile(const char* filePath) {
 
     f.close();
     stopSpeakerOutput();
+
+    // Restore default sample rate for test tones etc.
+    if (playbackRate != SAMPLE_RATE) {
+        i2s_set_sample_rates(I2S_PORT, SAMPLE_RATE);
+    }
 }
 
 // --- Setup ---

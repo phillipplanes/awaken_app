@@ -330,11 +330,11 @@ void serviceBatteryMonitor() {
 }
 
 void acquireI2SForLocalPlayback(uint32_t sampleRate) {
-    if (a2dpConnected) {
-        a2dpSink.setOutputActive(false);
-    }
     localAudioOwnsI2S = true;
-    delay(20); // let any in-flight A2DP write finish
+    // Stop I2S, flush stale A2DP data, reconfigure clock, restart for local use
+    i2s_stop(I2S_PORT);
+    delay(10);
+    i2s_zero_dma_buffer(I2S_PORT);
     esp_err_t err = i2s_set_clk(
         I2S_PORT,
         sampleRate,
@@ -345,9 +345,14 @@ void acquireI2SForLocalPlayback(uint32_t sampleRate) {
         Serial.print("i2s_set_clk(local) failed err=");
         Serial.println((int)err);
     }
+    i2s_start(I2S_PORT);
+    Serial.print("I2S acquired for local playback at ");
+    Serial.print(sampleRate);
+    Serial.println("Hz");
 }
 
 void releaseI2SToA2DP() {
+    i2s_stop(I2S_PORT);
     i2s_zero_dma_buffer(I2S_PORT);
     esp_err_t err = i2s_set_clk(
         I2S_PORT,
@@ -359,10 +364,8 @@ void releaseI2SToA2DP() {
         Serial.print("i2s_set_clk(a2dp) failed err=");
         Serial.println((int)err);
     }
+    i2s_start(I2S_PORT);
     localAudioOwnsI2S = false;
-    if (a2dpConnected) {
-        a2dpSink.setOutputActive(true);
-    }
 }
 
 void initDeviceNames() {
@@ -477,6 +480,33 @@ bool startFilePlayback(const char* filePath, bool loopPlayback, uint32_t sampleR
         return false;
     }
 
+    size_t fileSize = playbackFileHandle.size();
+    float durationSec = (sampleRate > 0) ? (float)fileSize / (2.0f * sampleRate) : 0;
+
+    Serial.println("=== PLAYBACK START ===");
+    Serial.print("  file: "); Serial.println(filePath);
+    Serial.print("  fileSize: "); Serial.print(fileSize); Serial.println(" bytes");
+    Serial.print("  sampleRate: "); Serial.print(sampleRate); Serial.println(" Hz");
+    Serial.print("  format: 16-bit mono PCM -> stereo I2S");
+    Serial.println();
+    Serial.print("  duration: "); Serial.print(durationSec, 1); Serial.println(" sec");
+    Serial.print("  loop: "); Serial.println(loopPlayback ? "yes" : "no");
+
+    // Dump first 16 bytes to verify data integrity
+    uint8_t header[16];
+    size_t headerRead = playbackFileHandle.read(header, sizeof(header));
+    if (headerRead > 0) {
+        Serial.print("  first bytes: ");
+        for (size_t i = 0; i < headerRead; i++) {
+            if (header[i] < 0x10) Serial.print("0");
+            Serial.print(header[i], HEX);
+            Serial.print(" ");
+        }
+        Serial.println();
+        playbackFileHandle.seek(0); // rewind after peeking
+    }
+    Serial.println("======================");
+
     playbackLoopEnabled = loopPlayback;
     playbackActive = true;
     return true;
@@ -508,7 +538,7 @@ void serviceFilePlayback() {
         stereoBuf[i * 2 + 1] = scaled;
     }
 
-    i2s_write(I2S_PORT, stereoBuf, samples * 2 * sizeof(int16_t), &bytesWritten, pdMS_TO_TICKS(10));
+    i2s_write(I2S_PORT, stereoBuf, samples * 2 * sizeof(int16_t), &bytesWritten, portMAX_DELAY);
 }
 
 bool parseAlarmTime(const std::string &raw, long &outHour, long &outMinute) {
@@ -955,12 +985,40 @@ class VoiceUploadCallback: public BLECharacteristicCallbacks {
             if (uploadedVoiceHandle) uploadedVoiceHandle.close();
             voiceUploadActive = false;
             uploadedVoiceReady = uploadedVoiceReceivedBytes > 0;
-            Serial.print("Voice upload done bytes=");
-            Serial.print(uploadedVoiceReceivedBytes);
-            Serial.print(" expected=");
-            Serial.print(uploadedVoiceExpectedBytes);
-            Serial.print(" sampleRate=");
-            Serial.println(uploadedVoiceSampleRate);
+
+            // Verify file on disk
+            File verifyFile = SPIFFS.open(uploadedVoiceFile, "r");
+            size_t diskSize = verifyFile ? verifyFile.size() : 0;
+            uint8_t diskHeader[16] = {0};
+            size_t diskHeaderRead = 0;
+            if (verifyFile) {
+                diskHeaderRead = verifyFile.read(diskHeader, sizeof(diskHeader));
+                verifyFile.close();
+            }
+
+            float durationSec = (uploadedVoiceSampleRate > 0)
+                ? (float)uploadedVoiceReceivedBytes / (2.0f * uploadedVoiceSampleRate)
+                : 0;
+
+            Serial.println("=== VOICE UPLOAD COMPLETE ===");
+            Serial.print("  received: "); Serial.print(uploadedVoiceReceivedBytes); Serial.println(" bytes");
+            Serial.print("  expected: "); Serial.print(uploadedVoiceExpectedBytes); Serial.println(" bytes");
+            Serial.print("  on disk:  "); Serial.print(diskSize); Serial.println(" bytes");
+            Serial.print("  match: "); Serial.println(
+                (uploadedVoiceReceivedBytes == uploadedVoiceExpectedBytes &&
+                 diskSize == uploadedVoiceReceivedBytes) ? "YES" : "MISMATCH");
+            Serial.print("  sampleRate: "); Serial.print(uploadedVoiceSampleRate); Serial.println(" Hz");
+            Serial.print("  duration: "); Serial.print(durationSec, 1); Serial.println(" sec");
+            if (diskHeaderRead > 0) {
+                Serial.print("  first bytes on disk: ");
+                for (size_t i = 0; i < diskHeaderRead; i++) {
+                    if (diskHeader[i] < 0x10) Serial.print("0");
+                    Serial.print(diskHeader[i], HEX);
+                    Serial.print(" ");
+                }
+                Serial.println();
+            }
+            Serial.println("=============================");
             return;
         }
     }

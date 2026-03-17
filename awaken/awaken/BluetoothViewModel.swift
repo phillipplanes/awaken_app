@@ -75,10 +75,16 @@ class BluetoothViewModel: NSObject, ObservableObject {
     @Published var scheduledAlarmDisplayTime: String?
     @Published var localAlarmFallbackActive: Bool = false
 
+    private static let bleRestoreIdentifier = "com.awaken.centralManager"
+
     // MARK: - Init
     override init() {
         super.init()
-        centralManager = CBCentralManager(delegate: self, queue: nil)
+        centralManager = CBCentralManager(
+            delegate: self,
+            queue: nil,
+            options: [CBCentralManagerOptionRestoreIdentifierKey: Self.bleRestoreIdentifier]
+        )
         configureAudioSession()
         startAudioRouteMonitoring()
         startAlarmNotificationMonitoring()
@@ -408,6 +414,12 @@ class BluetoothViewModel: NSObject, ObservableObject {
     }
 
     func syncDeviceAlarmAudio(_ pcmData: Data, sampleRate: Int, completion: @escaping (Bool) -> Void) {
+        // Prevent double uploads — cancel any in-progress upload first
+        if !voiceUploadPackets.isEmpty {
+            print("Voice upload already in progress, cancelling previous")
+            finishVoiceUpload(success: false)
+        }
+
         guard !hasDisabledVoiceUploadWrites else {
             voiceUploadStatus = "Device voice sync unavailable. Built-in device alarm sound will be used."
             completion(false)
@@ -426,7 +438,8 @@ class BluetoothViewModel: NSObject, ObservableObject {
             return
         }
 
-        guard let selectedWriteType = writeType(for: characteristic, preferWithoutResponse: true) else {
+        // Use withResponse for reliable delivery — noResp silently drops packets
+        guard let selectedWriteType = writeType(for: characteristic, preferWithoutResponse: false) else {
             voiceUploadStatus = "Device voice sync unavailable. Built-in device alarm sound will be used."
             completion(false)
             return
@@ -434,6 +447,16 @@ class BluetoothViewModel: NSObject, ObservableObject {
 
         let maxWrite = peripheral.maximumWriteValueLength(for: selectedWriteType)
         let chunkSize = max(8, min(180, maxWrite - 1))
+
+        let firstBytes = pcmData.prefix(16).map { String(format: "%02X", $0) }.joined(separator: " ")
+        let durationSec = Double(pcmData.count) / (2.0 * Double(sampleRate))
+        print("=== VOICE UPLOAD START (iOS) ===")
+        print("  pcmBytes: \(pcmData.count)")
+        print("  sampleRate: \(sampleRate) Hz")
+        print("  duration: \(String(format: "%.1f", durationSec)) sec")
+        print("  chunkSize: \(chunkSize) (maxWrite=\(maxWrite), writeType=\(selectedWriteType == .withoutResponse ? "noResp" : "withResp"))")
+        print("  first bytes: \(firstBytes)")
+        print("================================")
 
         var packets: [Data] = []
         var begin = Data([1])
@@ -453,13 +476,16 @@ class BluetoothViewModel: NSObject, ObservableObject {
         }
         packets.append(Data([3]))
 
+        let dataPackets = packets.count - 2 // exclude begin + end
+        print("  totalPackets: \(packets.count) (1 begin + \(dataPackets) data + 1 end)")
+
         voiceUploadPackets = packets
         voiceUploadPacketIndex = 0
         voiceUploadWriteType = selectedWriteType
         voiceUploadCompletion = completion
         voiceUploadProgress = 0
-        voiceUploadStatus = "Syncing audio to device..."
-        voiceUploadDeadline = Date().addingTimeInterval(20)
+        voiceUploadStatus = "Syncing \(pcmData.count) bytes (\(String(format: "%.1f", durationSec))s) to device..."
+        voiceUploadDeadline = Date().addingTimeInterval(300) // withResponse is slow, allow 5 min
 
         sendNextVoiceUploadPacket()
     }
@@ -526,10 +552,16 @@ class BluetoothViewModel: NSObject, ObservableObject {
         voiceUploadDeadline = nil
 
         if success {
-            voiceUploadStatus = "Audio synced to device"
+            let sentPackets = voiceUploadPacketIndex
+            let totalPackets = voiceUploadPackets.count
+            print("=== VOICE UPLOAD DONE (iOS) === sent \(sentPackets)/\(totalPackets) packets")
+            voiceUploadStatus = "Audio synced (\(sentPackets)/\(totalPackets) packets)"
             voiceUploadProgress = voiceUploadPackets.isEmpty ? 0 : 1
         } else {
-            voiceUploadStatus = "Device voice sync unavailable. Built-in device alarm sound will be used."
+            let sentPackets = voiceUploadPacketIndex
+            let totalPackets = voiceUploadPackets.count
+            print("=== VOICE UPLOAD FAILED (iOS) === sent \(sentPackets)/\(totalPackets) packets")
+            voiceUploadStatus = "Sync failed (\(sentPackets)/\(totalPackets) packets). Device will use built-in sound."
             voiceUploadProgress = 0
         }
 
@@ -571,8 +603,24 @@ class BluetoothViewModel: NSObject, ObservableObject {
 
 // MARK: - CBCentralManagerDelegate
 extension BluetoothViewModel: CBCentralManagerDelegate {
+    func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
+           let restored = peripherals.first {
+            alarmClockPeripheral = restored
+            restored.delegate = self
+            if restored.state == .connected {
+                connectionStatus = "Connected"
+                restored.discoverServices([ALARM_SERVICE_UUID])
+            }
+        }
+    }
+
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         if central.state == .poweredOn {
+            // Try to reconnect a restored peripheral in addition to scanning
+            if let peripheral = alarmClockPeripheral, peripheral.state == .disconnected {
+                central.connect(peripheral, options: nil)
+            }
             startScanning()
         } else {
             connectionStatus = "Bluetooth is not available."
@@ -761,9 +809,11 @@ extension BluetoothViewModel: CBPeripheralDelegate {
                 self.hasDRV2605L = (data[0] & 0x01) != 0
                 self.hasSpeakerAmp = (data[0] & 0x02) != 0
             case ALARM_STATE_CHARACTERISTIC_UUID:
-                self.alarmFiring = (data[0] == 1)
-                if self.alarmFiring {
+                let firing = (data[0] == 1)
+                self.alarmFiring = firing
+                if firing {
                     self.localAlarmFallbackActive = false
+                    AlarmNotificationManager.shared.fireImmediateAlarmNotification()
                 }
             case BATTERY_LEVEL_CHARACTERISTIC_UUID:
                 self.batteryLevelPercent = data[0] <= 100 ? Int(data[0]) : nil

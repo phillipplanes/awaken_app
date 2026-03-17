@@ -65,6 +65,9 @@ final class VoiceMessageViewModel: ObservableObject {
                 let previewWav = makeWAVFileData(from: pcm24kData, sampleRate: 24000)
                 audioURL = try writeAudioFile(data: previewWav, fileExtension: "wav")
                 deviceUploadPCMData = pcm24kData
+                // Save a ≤30s version as the notification sound for lock-screen alarms
+                let notifWav = makeNotificationSoundWAV(from: pcm24kData, sampleRate: 24000, maxSeconds: 30)
+                AlarmNotificationManager.shared.saveCustomAlarmSound(wavData: notifWav)
             } catch {
                 throw OpenAIServiceError.invalidResponse("Audio processing failed: \(describe(error))")
             }
@@ -213,6 +216,13 @@ final class VoiceMessageViewModel: ObservableObject {
         }
 
         return makeWAVFileData(from: pcm, sampleRate: sampleRate)
+    }
+
+    private func makeNotificationSoundWAV(from pcmData: Data, sampleRate: Int, maxSeconds: Int) -> Data {
+        let bytesPerSample = 2
+        let maxBytes = sampleRate * bytesPerSample * maxSeconds
+        let trimmed = pcmData.count > maxBytes ? pcmData.prefix(maxBytes) : pcmData
+        return makeWAVFileData(from: Data(trimmed), sampleRate: sampleRate)
     }
 
     private func makeWAVFileData(from pcmData: Data, sampleRate: Int) -> Data {
