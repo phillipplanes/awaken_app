@@ -29,6 +29,7 @@ final class VoiceMessageViewModel: ObservableObject {
     @Published private(set) var status: Status = .idle
     @Published private(set) var scriptText = ""
     @Published private(set) var devicePCMData: Data?
+    @Published private(set) var devicePCMSampleRate: Int = 24000
 
     private var audioURL: URL?
     private var audioPlayer: AVAudioPlayer?
@@ -53,31 +54,32 @@ final class VoiceMessageViewModel: ObservableObject {
 
             let pcm24kData: Data
             do {
-                pcm24kData = try await service.synthesizeSpeech(text: script, voice: voice)
+                pcm24kData = try await service.synthesizeSpeech(text: script, voice: voice, format: "pcm")
                 logger.info("Received TTS PCM bytes: \(pcm24kData.count)")
             } catch {
                 throw OpenAIServiceError.invalidResponse("Speech synthesis failed: \(describe(error))")
             }
 
-            let pcm8kData: Data
-            let fileURL: URL
+            let deviceUploadPCMData: Data
             do {
-                pcm8kData = downsamplePCM24kTo8k(pcm24kData)
                 let previewWav = makeWAVFileData(from: pcm24kData, sampleRate: 24000)
-                fileURL = try writeAudioFile(data: previewWav, fileExtension: "wav")
+                audioURL = try writeAudioFile(data: previewWav, fileExtension: "wav")
+                deviceUploadPCMData = pcm24kData
             } catch {
                 throw OpenAIServiceError.invalidResponse("Audio processing failed: \(describe(error))")
             }
 
             scriptText = script
-            audioURL = fileURL
-            devicePCMData = pcm8kData
+            devicePCMData = deviceUploadPCMData
+            devicePCMSampleRate = 24000
             status = .ready
         } catch {
             logger.error("Voice generation failed: \(error.localizedDescription, privacy: .public)")
             let nsError = error as NSError
             logger.error("Voice generation NSError domain=\(nsError.domain, privacy: .public) code=\(nsError.code)")
+            audioURL = nil
             devicePCMData = nil
+            devicePCMSampleRate = 24000
             status = .failed(error.localizedDescription)
         }
     }
@@ -195,24 +197,6 @@ final class VoiceMessageViewModel: ObservableObject {
             .appendingPathExtension(fileExtension)
         try data.write(to: url, options: .atomic)
         return url
-    }
-
-    private func downsamplePCM24kTo8k(_ pcm24kData: Data) -> Data {
-        guard pcm24kData.count >= 2 else { return Data() }
-        let sampleCount = pcm24kData.count / 2
-        var output = Data(capacity: pcm24kData.count / 3)
-
-        pcm24kData.withUnsafeBytes { rawBuffer in
-            guard let samples = rawBuffer.bindMemory(to: Int16.self).baseAddress else { return }
-            var index = 0
-            while index < sampleCount {
-                var sampleLE = samples[index].littleEndian
-                withUnsafeBytes(of: &sampleLE) { output.append(contentsOf: $0) }
-                index += 3
-            }
-        }
-
-        return output
     }
 
     private func makeSineWaveWAV(frequencyHz: Double, durationSeconds: Double, sampleRate: Int) -> Data {

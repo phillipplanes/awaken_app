@@ -9,9 +9,14 @@ import SwiftUI
 
 @main
 struct awakenApp: App {
+    init() {
+        AlarmNotificationManager.shared.configure()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .preferredColorScheme(.light)
         }
     }
 }

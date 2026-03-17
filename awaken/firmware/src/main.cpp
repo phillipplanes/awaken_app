@@ -25,7 +25,17 @@
 #define I2S_BCLK   26
 #define I2S_LRC    27
 #define I2S_DOUT   25
-#else
+#elif defined(TARGET_BOARD_ADAFRUIT_FEATHER_ESP32_V2)
+#define BOARD_NAME "Adafruit Feather ESP32 V2"
+#define HAS_TFT_DISPLAY 0
+#define HAS_BATTERY_MONITOR 1
+#define BATTERY_MONITOR_PIN 35
+#define HW_I2C_SDA 22
+#define HW_I2C_SCL 20
+#define I2S_BCLK   26
+#define I2S_LRC    27
+#define I2S_DOUT   25
+#elif defined(TARGET_BOARD_ESP32S3_FEATHER_TFT)
 #define BOARD_NAME "Adafruit Feather ESP32-S3 TFT"
 #define HAS_TFT_DISPLAY 1
 #define HW_I2C_SDA 42
@@ -39,6 +49,13 @@
 #define TFT_MOSI     35
 #define TFT_SCLK     36
 #define TFT_BACKLIGHT 45
+#define HAS_BATTERY_MONITOR 0
+#else
+#error "Unsupported target board for main.cpp"
+#endif
+
+#if !defined(HAS_BATTERY_MONITOR)
+#define HAS_BATTERY_MONITOR 0
 #endif
 
 #if HAS_TFT_DISPLAY
@@ -55,6 +72,14 @@ Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RS
 Adafruit_DRV2605 drv;
 uint8_t vibrationIntensity = 64;
 uint8_t wakeEffectId = 1; // Default: Strong Click
+constexpr uint8_t CUSTOM_EFFECT_SINE_RAMP = 124;
+constexpr unsigned long CUSTOM_HAPTIC_CYCLE_MS = 60000;
+constexpr unsigned long CUSTOM_HAPTIC_UPDATE_INTERVAL_MS = 40;
+uint8_t currentDrvMode = 0xFF;
+bool customHapticActive = false;
+bool customHapticLoop = false;
+unsigned long customHapticStartMs = 0;
+unsigned long customHapticLastUpdateMs = 0;
 
 // --- Audio (MAX98357A I2S amp) ---
 #define I2S_PORT   I2S_NUM_0
@@ -83,6 +108,8 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", -18000);
 #define SPEAKER_CONTROL_CHAR_UUID  "beb5483e-36e1-4688-b7f5-ea07361b26b1"
 #define RINGTONE_SELECT_CHAR_UUID  "beb5483e-36e1-4688-b7f5-ea07361b26b2"
 #define VOICE_UPLOAD_CHAR_UUID     "beb5483e-36e1-4688-b7f5-ea07361b26b3"
+#define TIME_SYNC_CHAR_UUID        "beb5483e-36e1-4688-b7f5-ea07361b26b4"
+#define BATTERY_LEVEL_CHAR_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26b5"
 
 #define STATUS_DRV2605L  0x01
 #define STATUS_MAX98357  0x02
@@ -108,12 +135,18 @@ BLECharacteristic *pSpeakerVolumeChar;
 BLECharacteristic *pSpeakerControlChar;
 BLECharacteristic *pRingtoneSelectChar;
 BLECharacteristic *pVoiceUploadChar;
+BLECharacteristic *pTimeSyncChar;
+BLECharacteristic *pBatteryLevelChar;
 
 bool deviceConnected = false;
 uint8_t moduleStatus = 0;
 bool alarmSoundEnabled = true;
 // speakerVolume 0-100 scales I2S sample amplitude (0 = silent)
 uint8_t speakerVolume = 60;
+constexpr uint8_t BATTERY_LEVEL_UNAVAILABLE = 0xFF;
+constexpr unsigned long BATTERY_SAMPLE_INTERVAL_MS = 60000;
+uint8_t batteryLevelPercent = BATTERY_LEVEL_UNAVAILABLE;
+unsigned long lastBatterySampleMs = 0;
 
 // --- Ringtone Selection ---
 uint8_t selectedRingtone = 0; // 0, 1, or 2
@@ -134,6 +167,10 @@ bool alarmFiring = false;
 unsigned long alarmStartTime = 0;
 unsigned long lastAlarmPulse = 0;
 bool wifiConnected = false;
+bool hasAppTime = false;
+unsigned long alarmDeadlineMs = 0;
+unsigned long appTimeSyncMillis = 0;
+uint32_t appTimeSyncSecOfDay = 0;
 
 #if HAS_TFT_DISPLAY
 // --- Display State Tracking ---
@@ -153,6 +190,21 @@ void playAlarmAudioFromFile(const char* filePath);
 void stopSpeakerOutput();
 void runSpeakerSelfTest();
 void initI2SAudio();
+bool isCustomHapticEffect(uint8_t effectId);
+void ensureDrvMode(uint8_t mode);
+void stopHaptics();
+void playStandardHapticEffect(uint8_t effectId);
+void startCustomHapticPattern(bool shouldLoop);
+void stopCustomHapticPattern();
+bool serviceCustomHapticPattern();
+void initBatteryMonitor();
+void serviceBatteryMonitor();
+uint8_t readBatteryLevelPercent();
+void updateBatteryLevelCharacteristic(bool notifySubscribers);
+bool parseAlarmTime(const std::string &raw, long &outHour, long &outMinute);
+bool parseAlarmDelaySeconds(const std::string &raw, unsigned long &outDelaySec);
+bool parseHms(const std::string &raw, uint32_t &secOfDay);
+bool getAppTimeHm(int &hour, int &minute);
 
 // --- BLE Server Callbacks ---
 class MyServerCallbacks: public BLEServerCallbacks {
@@ -168,20 +220,31 @@ class MyServerCallbacks: public BLEServerCallbacks {
 class AlarmCallback: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pChar) {
         std::string value = pChar->getValue();
-        if (value.length() == 5 && value[2] == ':') {
-            String timeStr = String(value.c_str());
-            long newHour = timeStr.substring(0, 2).toInt();
-            long newMinute = timeStr.substring(3, 5).toInt();
-            if (newHour >= 0 && newHour <= 23 && newMinute >= 0 && newMinute <= 59) {
-                alarmHour = newHour;
-                alarmMinute = newMinute;
-                alarmIsSet = true;
-                alarmIsTriggered = false;
-                Serial.print("Alarm set for: ");
-                Serial.print(alarmHour);
-                Serial.print(":");
-                Serial.println(alarmMinute);
+        long newHour = -1;
+        long newMinute = -1;
+        unsigned long delaySec = 0;
+        if (parseAlarmTime(value, newHour, newMinute)) {
+            alarmHour = newHour;
+            alarmMinute = newMinute;
+            alarmIsSet = true;
+            alarmIsTriggered = false;
+            if (parseAlarmDelaySeconds(value, delaySec)) {
+                alarmDeadlineMs = millis() + (delaySec * 1000UL);
+            } else {
+                alarmDeadlineMs = 0;
             }
+            Serial.print("Alarm set for: ");
+            Serial.print(alarmHour);
+            Serial.print(":");
+            Serial.println(alarmMinute);
+            if (!wifiConnected && !hasAppTime && alarmDeadlineMs > 0) {
+                Serial.print("Alarm fallback countdown sec=");
+                Serial.println(delaySec);
+            }
+        } else {
+            Serial.print("Alarm write parse failed: '");
+            Serial.print(String(value.c_str()));
+            Serial.println("'");
         }
     }
 };
@@ -193,14 +256,12 @@ class IntensityCallback: public BLECharacteristicCallbacks {
         if (value.length() >= 1) {
             uint8_t intensity = (uint8_t)value[0];
             vibrationIntensity = intensity;
+            stopCustomHapticPattern();
             if (intensity == 0) {
-                drv.setMode(DRV2605_MODE_INTTRIG);
-                delay(10);
-                drv.setRealtimeValue(0);
+                stopHaptics();
                 Serial.println("Motor stopped");
             } else {
-                drv.setMode(DRV2605_MODE_REALTIME);
-                delay(10);
+                ensureDrvMode(DRV2605_MODE_REALTIME);
                 drv.setRealtimeValue(intensity);
                 Serial.print("Vibration intensity: ");
                 Serial.println(intensity);
@@ -215,13 +276,11 @@ class EffectCallback: public BLECharacteristicCallbacks {
         std::string value = pChar->getValue();
         if (value.length() >= 1) {
             uint8_t effectId = (uint8_t)value[0];
-            if (effectId >= 1 && effectId <= 123) {
-                drv.setMode(DRV2605_MODE_INTTRIG);
-                delay(10);
-                drv.setWaveform(0, effectId);
-                drv.setWaveform(1, 0);
-                drv.go();
-                delay(10);
+            if (isCustomHapticEffect(effectId)) {
+                startCustomHapticPattern(false);
+                Serial.println("Playing custom sine ramp effect");
+            } else if (effectId >= 1 && effectId <= 123) {
+                playStandardHapticEffect(effectId);
                 Serial.print("Playing effect: ");
                 Serial.println(effectId);
             }
@@ -234,7 +293,7 @@ class WakeEffectCallback: public BLECharacteristicCallbacks {
         std::string value = pChar->getValue();
         if (value.length() >= 1) {
             uint8_t effectId = (uint8_t)value[0];
-            if (effectId >= 1 && effectId <= 123) {
+            if (isCustomHapticEffect(effectId) || (effectId >= 1 && effectId <= 123)) {
                 wakeEffectId = effectId;
                 Serial.print("Wake effect set to: ");
                 Serial.println(effectId);
@@ -383,6 +442,28 @@ class VoiceUploadCallback: public BLECharacteristicCallbacks {
     }
 };
 
+class TimeSyncCallback: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pChar) {
+        std::string value = pChar->getValue();
+        if (value.empty()) return;
+        uint32_t secOfDay = 0;
+        if (!parseHms(value, secOfDay)) {
+            Serial.print("Time sync parse failed: '");
+            Serial.print(String(value.c_str()));
+            Serial.println("'");
+            return;
+        }
+
+        appTimeSyncSecOfDay = secOfDay;
+        appTimeSyncMillis = millis();
+        hasAppTime = true;
+        int hh = (int)(secOfDay / 3600UL);
+        int mm = (int)((secOfDay % 3600UL) / 60UL);
+        int ss = (int)(secOfDay % 60UL);
+        Serial.printf("App time synced: %02d:%02d:%02d\n", hh, mm, ss);
+    }
+};
+
 // --- Alarm Control Functions ---
 
 void notifyAlarmState(uint8_t state) {
@@ -395,11 +476,8 @@ void notifyAlarmState(uint8_t state) {
 void stopAlarm() {
     alarmFiring = false;
     alarmIsSet = false;
-    if (moduleStatus & STATUS_DRV2605L) {
-        drv.setMode(DRV2605_MODE_INTTRIG);
-        delay(10);
-        drv.setRealtimeValue(0);
-    }
+    alarmDeadlineMs = 0;
+    stopHaptics();
     notifyAlarmState(0);
     stopSpeakerOutput();
     Serial.println("Alarm stopped");
@@ -407,11 +485,7 @@ void stopAlarm() {
 
 void snoozeAlarm() {
     alarmFiring = false;
-    if (moduleStatus & STATUS_DRV2605L) {
-        drv.setMode(DRV2605_MODE_INTTRIG);
-        delay(10);
-        drv.setRealtimeValue(0);
-    }
+    stopHaptics();
 
     alarmMinute += 5;
     if (alarmMinute >= 60) {
@@ -419,6 +493,7 @@ void snoozeAlarm() {
         alarmHour = (alarmHour + 1) % 24;
     }
     alarmIsTriggered = false;
+    alarmDeadlineMs = millis() + (5UL * 60UL * 1000UL);
     notifyAlarmState(0);
     stopSpeakerOutput();
     Serial.print("Snoozed. Next alarm: ");
@@ -433,7 +508,209 @@ void triggerAlarm() {
     alarmFiring = true;
     alarmStartTime = millis();
     lastAlarmPulse = 0; // Force immediate first pulse
+    if (isCustomHapticEffect(wakeEffectId)) {
+        startCustomHapticPattern(true);
+    } else {
+        stopCustomHapticPattern();
+    }
     notifyAlarmState(1);
+}
+
+bool isCustomHapticEffect(uint8_t effectId) {
+    return effectId == CUSTOM_EFFECT_SINE_RAMP;
+}
+
+void ensureDrvMode(uint8_t mode) {
+    if (!(moduleStatus & STATUS_DRV2605L)) return;
+    if (currentDrvMode == mode) return;
+    drv.setMode(mode);
+    delay(10);
+    currentDrvMode = mode;
+}
+
+void stopHaptics() {
+    customHapticActive = false;
+    customHapticLoop = false;
+    if (!(moduleStatus & STATUS_DRV2605L)) return;
+    ensureDrvMode(DRV2605_MODE_REALTIME);
+    drv.setRealtimeValue(0);
+}
+
+void playStandardHapticEffect(uint8_t effectId) {
+    if (!(moduleStatus & STATUS_DRV2605L)) return;
+    stopCustomHapticPattern();
+    ensureDrvMode(DRV2605_MODE_INTTRIG);
+    drv.setWaveform(0, effectId);
+    drv.setWaveform(1, 0);
+    drv.go();
+    delay(10);
+}
+
+void startCustomHapticPattern(bool shouldLoop) {
+    if (!(moduleStatus & STATUS_DRV2605L)) return;
+    customHapticActive = true;
+    customHapticLoop = shouldLoop;
+    customHapticStartMs = millis();
+    customHapticLastUpdateMs = 0;
+    ensureDrvMode(DRV2605_MODE_REALTIME);
+    drv.setRealtimeValue(0);
+}
+
+void stopCustomHapticPattern() {
+    if (!(moduleStatus & STATUS_DRV2605L)) {
+        customHapticActive = false;
+        customHapticLoop = false;
+        return;
+    }
+    if (!customHapticActive) return;
+    customHapticActive = false;
+    customHapticLoop = false;
+    ensureDrvMode(DRV2605_MODE_REALTIME);
+    drv.setRealtimeValue(0);
+}
+
+bool serviceCustomHapticPattern() {
+    if (!(moduleStatus & STATUS_DRV2605L) || !customHapticActive) return false;
+
+    unsigned long now = millis();
+    if (customHapticLastUpdateMs != 0 &&
+        now - customHapticLastUpdateMs < CUSTOM_HAPTIC_UPDATE_INTERVAL_MS) {
+        return true;
+    }
+
+    unsigned long elapsed = now - customHapticStartMs;
+    if (!customHapticLoop && elapsed >= CUSTOM_HAPTIC_CYCLE_MS) {
+        stopCustomHapticPattern();
+        return false;
+    }
+    if (customHapticLoop) {
+        elapsed %= CUSTOM_HAPTIC_CYCLE_MS;
+    }
+
+    float phase = ((2.0f * M_PI * elapsed) / CUSTOM_HAPTIC_CYCLE_MS) - (M_PI / 2.0f);
+    float normalized = (sinf(phase) + 1.0f) * 0.5f;
+    uint8_t intensity = (uint8_t)roundf(normalized * 127.0f);
+
+    ensureDrvMode(DRV2605_MODE_REALTIME);
+    drv.setRealtimeValue(intensity);
+    customHapticLastUpdateMs = now;
+    return true;
+}
+
+bool parseAlarmTime(const std::string &raw, long &outHour, long &outMinute) {
+    if (raw.empty()) return false;
+    String value(raw.c_str());
+    value.trim();
+    int pipeIdx = value.indexOf('|');
+    if (pipeIdx >= 0) {
+        value = value.substring(0, pipeIdx);
+        value.trim();
+    }
+
+    int colon = value.indexOf(':');
+    if (colon < 1 || colon > 2) return false;
+    if (value.length() < colon + 3) return false;
+
+    long hour = value.substring(0, colon).toInt();
+    long minute = value.substring(colon + 1, colon + 3).toInt();
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return false;
+
+    outHour = hour;
+    outMinute = minute;
+    return true;
+}
+
+bool parseAlarmDelaySeconds(const std::string &raw, unsigned long &outDelaySec) {
+    String value(raw.c_str());
+    value.trim();
+    int pipeIdx = value.indexOf('|');
+    if (pipeIdx < 0 || pipeIdx + 1 >= value.length()) return false;
+
+    String delayPart = value.substring(pipeIdx + 1);
+    delayPart.trim();
+    if (delayPart.length() == 0) return false;
+
+    long parsed = delayPart.toInt();
+    if (parsed <= 0) return false;
+    outDelaySec = (unsigned long)parsed;
+    return true;
+}
+
+bool parseHms(const std::string &raw, uint32_t &secOfDay) {
+    String value(raw.c_str());
+    value.trim();
+    int c1 = value.indexOf(':');
+    if (c1 < 1) return false;
+    int c2 = value.indexOf(':', c1 + 1);
+    if (c2 < 0) c2 = value.length();
+    if (c2 <= c1 + 1) return false;
+
+    long hour = value.substring(0, c1).toInt();
+    long minute = value.substring(c1 + 1, c2).toInt();
+    long second = 0;
+    if (c2 < value.length() - 1) {
+        second = value.substring(c2 + 1).toInt();
+    }
+
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+        return false;
+    }
+
+    secOfDay = (uint32_t)(hour * 3600 + minute * 60 + second);
+    return true;
+}
+
+bool getAppTimeHm(int &hour, int &minute) {
+    if (!hasAppTime) return false;
+    unsigned long elapsedSec = (millis() - appTimeSyncMillis) / 1000UL;
+    uint32_t secOfDay = (appTimeSyncSecOfDay + elapsedSec) % 86400UL;
+    hour = (int)(secOfDay / 3600UL);
+    minute = (int)((secOfDay % 3600UL) / 60UL);
+    return true;
+}
+
+uint8_t readBatteryLevelPercent() {
+#if HAS_BATTERY_MONITOR
+    uint32_t millivolts = analogReadMilliVolts(BATTERY_MONITOR_PIN);
+    if (millivolts == 0) return BATTERY_LEVEL_UNAVAILABLE;
+
+    float batteryVolts = (millivolts * 2.0f) / 1000.0f;
+    if (batteryVolts <= 3.2f) return 0;
+    if (batteryVolts >= 4.2f) return 100;
+    return (uint8_t)roundf((batteryVolts - 3.2f) * 100.0f);
+#else
+    return BATTERY_LEVEL_UNAVAILABLE;
+#endif
+}
+
+void updateBatteryLevelCharacteristic(bool notifySubscribers) {
+    uint8_t latest = readBatteryLevelPercent();
+    bool changed = latest != batteryLevelPercent;
+    batteryLevelPercent = latest;
+
+    if (!pBatteryLevelChar) return;
+    pBatteryLevelChar->setValue(&batteryLevelPercent, 1);
+    if (notifySubscribers && changed) {
+        pBatteryLevelChar->notify();
+    }
+}
+
+void initBatteryMonitor() {
+#if HAS_BATTERY_MONITOR
+    pinMode(BATTERY_MONITOR_PIN, INPUT);
+    analogSetPinAttenuation(BATTERY_MONITOR_PIN, ADC_11db);
+#endif
+    updateBatteryLevelCharacteristic(false);
+    lastBatterySampleMs = millis();
+}
+
+void serviceBatteryMonitor() {
+    unsigned long now = millis();
+    if (lastBatterySampleMs != 0 && now - lastBatterySampleMs < BATTERY_SAMPLE_INTERVAL_MS) {
+        return;
+    }
+    updateBatteryLevelCharacteristic(true);
+    lastBatterySampleMs = now;
 }
 
 // --- Display ---
@@ -736,18 +1013,18 @@ void playAlarmAudioFromFile(const char* filePath) {
             if (loopForAlarm && !alarmFiring) break;
 
             if (loopForAlarm) {
-                // Re-trigger haptic effect every 2.5 seconds
-                unsigned long now = millis();
-                if (now - lastHapticPulse > 2500) {
-                    if (moduleStatus & STATUS_DRV2605L) {
-                        drv.setMode(DRV2605_MODE_INTTRIG);
-                        delay(10);
-                        drv.setWaveform(0, wakeEffectId);
-                        drv.setWaveform(1, 0);
-                        drv.go();
-                        delay(10);
+                if (isCustomHapticEffect(wakeEffectId)) {
+                    if (!customHapticActive) startCustomHapticPattern(true);
+                    serviceCustomHapticPattern();
+                } else {
+                    if (customHapticActive) stopCustomHapticPattern();
+
+                    // Re-trigger haptic effect every 2.5 seconds
+                    unsigned long now = millis();
+                    if (now - lastHapticPulse > 2500) {
+                        playStandardHapticEffect(wakeEffectId);
+                        lastHapticPulse = now;
                     }
-                    lastHapticPulse = now;
                 }
             }
 
@@ -804,6 +1081,7 @@ void setup() {
     if (drv.begin()) {
         drv.selectLibrary(1);
         drv.setMode(DRV2605_MODE_INTTRIG);
+        currentDrvMode = DRV2605_MODE_INTTRIG;
         drv.setWaveform(0, 1); // Strong Click
         drv.setWaveform(1, 0);
         drv.go();
@@ -828,6 +1106,8 @@ void setup() {
     if (wifiConnected) {
         timeClient.begin();
     }
+
+    initBatteryMonitor();
 
     // --- BLE ---
     BLEDevice::init("Awaken-Control");
@@ -863,7 +1143,8 @@ void setup() {
     pAlarmStateChar->setValue(&initialState, 1);
 
     pAlarmControlChar = pService->createCharacteristic(
-        ALARM_CONTROL_CHAR_UUID, BLECharacteristic::PROPERTY_WRITE);
+        ALARM_CONTROL_CHAR_UUID,
+        BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
     pAlarmControlChar->setCallbacks(new AlarmControlCallback());
 
     pSpeakerVolumeChar = pService->createCharacteristic(
@@ -873,7 +1154,8 @@ void setup() {
     pSpeakerVolumeChar->setValue(&speakerVolume, 1);
 
     pSpeakerControlChar = pService->createCharacteristic(
-        SPEAKER_CONTROL_CHAR_UUID, BLECharacteristic::PROPERTY_WRITE);
+        SPEAKER_CONTROL_CHAR_UUID,
+        BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
     pSpeakerControlChar->setCallbacks(new SpeakerControlCallback());
 
     pRingtoneSelectChar = pService->createCharacteristic(
@@ -885,6 +1167,17 @@ void setup() {
     pVoiceUploadChar = pService->createCharacteristic(
         VOICE_UPLOAD_CHAR_UUID, BLECharacteristic::PROPERTY_WRITE);
     pVoiceUploadChar->setCallbacks(new VoiceUploadCallback());
+
+    pTimeSyncChar = pService->createCharacteristic(
+        TIME_SYNC_CHAR_UUID,
+        BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+    pTimeSyncChar->setCallbacks(new TimeSyncCallback());
+
+    pBatteryLevelChar = pService->createCharacteristic(
+        BATTERY_LEVEL_CHAR_UUID,
+        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+    pBatteryLevelChar->addDescriptor(new BLE2902());
+    pBatteryLevelChar->setValue(&batteryLevelPercent, 1);
 
     pService->start();
 
@@ -901,13 +1194,28 @@ void setup() {
 // --- Main Loop ---
 
 void loop() {
-    if (wifiConnected) {
-        timeClient.update();
+    serviceBatteryMonitor();
 
-        if (alarmIsSet && !alarmIsTriggered) {
-            if (timeClient.getHours() == alarmHour && timeClient.getMinutes() == alarmMinute) {
+    if (alarmIsSet && !alarmIsTriggered) {
+        int currentHour = -1;
+        int currentMinute = -1;
+        bool hasCurrentTime = false;
+
+        if (getAppTimeHm(currentHour, currentMinute)) {
+            hasCurrentTime = true;
+        } else if (wifiConnected) {
+            timeClient.update();
+            currentHour = timeClient.getHours();
+            currentMinute = timeClient.getMinutes();
+            hasCurrentTime = true;
+        }
+
+        if (hasCurrentTime) {
+            if (currentHour == alarmHour && currentMinute == alarmMinute) {
                 triggerAlarm();
             }
+        } else if (alarmDeadlineMs > 0 && millis() >= alarmDeadlineMs) {
+            triggerAlarm();
         }
     }
 
@@ -920,22 +1228,26 @@ void loop() {
                 playAlarmAudioFromFile(ringtoneFiles[selectedRingtone]);
             }
         } else {
-            // Sound disabled — still pulse haptics
-            unsigned long now = millis();
-            if (now - lastAlarmPulse > 2500) {
-                if (moduleStatus & STATUS_DRV2605L) {
-                    drv.setMode(DRV2605_MODE_INTTRIG);
-                    delay(10);
-                    drv.setWaveform(0, wakeEffectId);
-                    drv.setWaveform(1, 0);
-                    drv.go();
-                    delay(10);
+            if (isCustomHapticEffect(wakeEffectId)) {
+                if (!customHapticActive) startCustomHapticPattern(true);
+                serviceCustomHapticPattern();
+            } else {
+                if (customHapticActive) stopCustomHapticPattern();
+
+                // Sound disabled — still pulse haptics
+                unsigned long now = millis();
+                if (now - lastAlarmPulse > 2500) {
+                    playStandardHapticEffect(wakeEffectId);
+                    lastAlarmPulse = now;
                 }
-                lastAlarmPulse = now;
             }
         }
     }
 
+    if (customHapticActive) {
+        serviceCustomHapticPattern();
+    }
+
     updateDisplay();
-    delay(1000);
+    delay(customHapticActive ? 20 : 1000);
 }

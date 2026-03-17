@@ -60,13 +60,13 @@ struct OpenAIService {
         return content
     }
 
-    func synthesizeSpeech(text: String, voice: String) async throws -> Data {
+    func synthesizeSpeech(text: String, voice: String, format: String = "wav") async throws -> Data {
         let models = ["gpt-4o-mini-tts", "tts-1"]
         var lastError: Error?
 
         for model in models {
             do {
-                let requestBody = SpeechRequest(model: model, input: text, voice: voice, format: "pcm")
+                let requestBody = SpeechRequest(model: model, input: text, voice: voice, format: format)
 
                 var request = URLRequest(url: URL(string: "https://api.openai.com/v1/audio/speech")!)
                 request.httpMethod = "POST"

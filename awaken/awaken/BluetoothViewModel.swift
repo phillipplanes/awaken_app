@@ -15,6 +15,8 @@ let ALARM_CONTROL_CHARACTERISTIC_UUID = CBUUID(string: "beb5483e-36e1-4688-b7f5-
 let SPEAKER_VOLUME_CHARACTERISTIC_UUID = CBUUID(string: "beb5483e-36e1-4688-b7f5-ea07361b26b0")
 let SPEAKER_CONTROL_CHARACTERISTIC_UUID = CBUUID(string: "beb5483e-36e1-4688-b7f5-ea07361b26b1")
 let VOICE_UPLOAD_CHARACTERISTIC_UUID = CBUUID(string: "beb5483e-36e1-4688-b7f5-ea07361b26b3")
+let TIME_SYNC_CHARACTERISTIC_UUID = CBUUID(string: "beb5483e-36e1-4688-b7f5-ea07361b26b4")
+let BATTERY_LEVEL_CHARACTERISTIC_UUID = CBUUID(string: "beb5483e-36e1-4688-b7f5-ea07361b26b5")
 
 class BluetoothViewModel: NSObject, ObservableObject {
 
@@ -31,10 +33,19 @@ class BluetoothViewModel: NSObject, ObservableObject {
     private var speakerVolumeCharacteristic: CBCharacteristic?
     private var speakerControlCharacteristic: CBCharacteristic?
     private var voiceUploadCharacteristic: CBCharacteristic?
+    private var timeSyncCharacteristic: CBCharacteristic?
+    private var batteryLevelCharacteristic: CBCharacteristic?
     private var voiceUploadPackets: [Data] = []
     private var voiceUploadPacketIndex: Int = 0
+    private var voiceUploadWriteType: CBCharacteristicWriteType?
     private var voiceUploadCompletion: ((Bool) -> Void)?
+    private var voiceUploadRetryWorkItem: DispatchWorkItem?
+    private var voiceUploadDeadline: Date?
+    private var hasDisabledTimeSyncWrites: Bool = false
+    private var hasDisabledVoiceUploadWrites: Bool = false
     private var audioRouteObserver: NSObjectProtocol?
+    private var notificationObservers: [NSObjectProtocol] = []
+    private var localAlarmFallbackWorkItem: DispatchWorkItem?
     private var pendingAlarmDisplayTime: String?
     private var userDisconnectRequested: Bool = false
     private var reconnectAttempts: Int = 0
@@ -46,6 +57,8 @@ class BluetoothViewModel: NSObject, ObservableObject {
     @Published var vibrationIntensity: Double = 50
     @Published var hasDRV2605L: Bool = false
     @Published var hasSpeakerAmp: Bool = false
+    @Published var hasBatteryTelemetry: Bool = false
+    @Published var batteryLevelPercent: Int?
     @Published var alarmFiring: Bool = false
     @Published var selectedWakeEffect: UInt8 = 1
     @Published var speakerVolume: Double = 60
@@ -53,11 +66,14 @@ class BluetoothViewModel: NSObject, ObservableObject {
     @Published var testToneFrequency: Double = 880
     @Published var voiceUploadProgress: Double = 0
     @Published var voiceUploadStatus: String = ""
+    @Published var canSyncGeneratedAudioToDevice: Bool = false
     @Published var audioRouteName: String = "Unknown"
     @Published var audioRouteStatus: String = "Checking audio route..."
     @Published var isAwakenAudioRouteActive: Bool = false
     @Published var hasVerifiedLiveAlarm: Bool = false
     @Published var liveAlarmVerificationMessage: String = ""
+    @Published var scheduledAlarmDisplayTime: String?
+    @Published var localAlarmFallbackActive: Bool = false
 
     // MARK: - Init
     override init() {
@@ -65,11 +81,15 @@ class BluetoothViewModel: NSObject, ObservableObject {
         centralManager = CBCentralManager(delegate: self, queue: nil)
         configureAudioSession()
         startAudioRouteMonitoring()
+        startAlarmNotificationMonitoring()
         refreshAudioRoute()
     }
 
     deinit {
         if let observer = audioRouteObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        for observer in notificationObservers {
             NotificationCenter.default.removeObserver(observer)
         }
     }
@@ -93,6 +113,34 @@ class BluetoothViewModel: NSObject, ObservableObject {
         ) { [weak self] _ in
             self?.refreshAudioRoute()
         }
+    }
+
+    private func startAlarmNotificationMonitoring() {
+        let center = NotificationCenter.default
+        notificationObservers = [
+            center.addObserver(
+                forName: .awakenAlarmNotificationTriggered,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self, !self.alarmFiring else { return }
+                self.localAlarmFallbackActive = true
+            },
+            center.addObserver(
+                forName: .awakenAlarmNotificationStopRequested,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.stopAlarm()
+            },
+            center.addObserver(
+                forName: .awakenAlarmNotificationSnoozeRequested,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.snoozeAlarm()
+            }
+        ]
     }
 
     func refreshAudioRoute() {
@@ -142,28 +190,61 @@ class BluetoothViewModel: NSObject, ObservableObject {
         centralManager.cancelPeripheralConnection(peripheral)
     }
 
-    private func writeType(for characteristic: CBCharacteristic, preferResponse: Bool = false) -> CBCharacteristicWriteType? {
+    private func writeType(for characteristic: CBCharacteristic, preferWithoutResponse: Bool = true) -> CBCharacteristicWriteType? {
         let properties = characteristic.properties
 
-        if preferResponse && properties.contains(.write) {
-            return .withResponse
-        }
-        if properties.contains(.writeWithoutResponse) {
-            return .withoutResponse
-        }
-        if properties.contains(.write) {
-            return .withResponse
+        if preferWithoutResponse {
+            if properties.contains(.writeWithoutResponse) {
+                return .withoutResponse
+            }
+            if properties.contains(.write) {
+                return .withResponse
+            }
+        } else {
+            if properties.contains(.write) {
+                return .withResponse
+            }
+            if properties.contains(.writeWithoutResponse) {
+                return .withoutResponse
+            }
         }
         return nil
     }
 
-    private func writeValue(_ data: Data, for characteristic: CBCharacteristic, preferResponse: Bool = false) {
-        guard let peripheral = alarmClockPeripheral else { return }
-        guard let writeType = writeType(for: characteristic, preferResponse: preferResponse) else {
+    @discardableResult
+    private func writeValue(_ data: Data, for characteristic: CBCharacteristic, preferWithoutResponse: Bool = true) -> CBCharacteristicWriteType? {
+        guard let peripheral = alarmClockPeripheral else { return nil }
+        guard let writeType = writeType(for: characteristic, preferWithoutResponse: preferWithoutResponse) else {
             print("Write blocked: characteristic \(characteristic.uuid) is not writable")
-            return
+            return nil
         }
         peripheral.writeValue(data, for: characteristic, type: writeType)
+        return writeType
+    }
+
+    private func writeControlValue(_ data: Data, for characteristic: CBCharacteristic) {
+        _ = writeValue(data, for: characteristic, preferWithoutResponse: false)
+        if characteristic.properties.contains(.writeWithoutResponse) {
+            _ = writeValue(data, for: characteristic, preferWithoutResponse: true)
+        }
+    }
+
+    private func sendSpeakerCommand(_ data: Data, repeats: Int = 3) {
+        guard let characteristic = speakerControlCharacteristic else { return }
+
+        for index in 0..<max(1, repeats) {
+            let delay = Double(index) * 0.12
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self else { return }
+                _ = self.writeValue(data, for: characteristic)
+            }
+        }
+    }
+
+    private func repeatAlarmControlWrite(_ action: @escaping () -> Void) {
+        action()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: action)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: action)
     }
 
     // MARK: - Alarm
@@ -174,19 +255,52 @@ class BluetoothViewModel: NSObject, ObservableObject {
             return
         }
 
+        sendTimeSync()
+
         let payloadFormatter = DateFormatter()
         payloadFormatter.dateFormat = "HH:mm"
         let timeString = payloadFormatter.string(from: time)
+        let now = Date()
+        let target = time <= now ? time.addingTimeInterval(24 * 60 * 60) : time
+        let delaySeconds = max(1, Int(target.timeIntervalSince(now)))
+        let payload = "\(timeString)|\(delaySeconds)"
 
         let displayFormatter = DateFormatter()
         displayFormatter.dateFormat = "h:mm a"
         pendingAlarmDisplayTime = displayFormatter.string(from: time)
+        scheduledAlarmDisplayTime = pendingAlarmDisplayTime
+        scheduleLocalAlarmFallback(for: target, displayTime: pendingAlarmDisplayTime)
+        if alarmSoundEnabled {
+            Task {
+                await AlarmNotificationManager.shared.cancelPhoneAlarm()
+            }
+        } else {
+            AlarmNotificationManager.shared.schedulePhoneAlarm(
+                for: target,
+                displayTime: pendingAlarmDisplayTime
+            )
+        }
 
         hasVerifiedLiveAlarm = false
         liveAlarmVerificationMessage = "Verifying live alarm..."
 
-        guard let data = timeString.data(using: .utf8) else { return }
-        writeValue(data, for: characteristic, preferResponse: true)
+        guard let data = payload.data(using: .utf8) else { return }
+        let writeType = writeValue(data, for: characteristic)
+        if writeType == .withoutResponse {
+            hasVerifiedLiveAlarm = true
+            liveAlarmVerificationMessage = "Alarm sent for \(pendingAlarmDisplayTime ?? "scheduled time")"
+            pendingAlarmDisplayTime = nil
+        }
+    }
+
+    private func sendTimeSync() {
+        if hasDisabledTimeSyncWrites { return }
+        guard let characteristic = timeSyncCharacteristic else { return }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        let payload = formatter.string(from: Date())
+        guard let data = payload.data(using: .utf8) else { return }
+        _ = writeValue(data, for: characteristic)
     }
 
     func setWakeEffect(_ effectId: UInt8) {
@@ -196,16 +310,59 @@ class BluetoothViewModel: NSObject, ObservableObject {
     }
 
     func stopAlarm() {
-        guard let characteristic = alarmControlCharacteristic else { return }
         hasVerifiedLiveAlarm = false
         liveAlarmVerificationMessage = ""
         pendingAlarmDisplayTime = nil
-        writeValue(Data([0]), for: characteristic)
+        scheduledAlarmDisplayTime = nil
+        clearLocalAlarmFallback()
+        alarmFiring = false
+        Task {
+            await AlarmNotificationManager.shared.cancelPhoneAlarm()
+        }
+        repeatAlarmControlWrite { [weak self] in
+            guard let self else { return }
+            if let intensityControl = self.intensityCharacteristic {
+                self.writeControlValue(Data([0]), for: intensityControl)
+            }
+            if let speakerControl = self.speakerControlCharacteristic {
+                self.writeControlValue(Data([0]), for: speakerControl)
+            }
+            if let characteristic = self.alarmControlCharacteristic {
+                self.writeControlValue(Data([0]), for: characteristic)
+            }
+        }
     }
 
     func snoozeAlarm() {
-        guard let characteristic = alarmControlCharacteristic else { return }
-        writeValue(Data([1]), for: characteristic)
+        let snoozeDate = Date().addingTimeInterval(5 * 60)
+        let displayFormatter = DateFormatter()
+        displayFormatter.dateFormat = "h:mm a"
+        scheduledAlarmDisplayTime = displayFormatter.string(from: snoozeDate)
+        scheduleLocalAlarmFallback(for: snoozeDate, displayTime: scheduledAlarmDisplayTime)
+        alarmFiring = false
+        localAlarmFallbackActive = false
+        if alarmSoundEnabled {
+            Task {
+                await AlarmNotificationManager.shared.cancelPhoneAlarm()
+            }
+        } else {
+            AlarmNotificationManager.shared.schedulePhoneAlarm(
+                for: snoozeDate,
+                displayTime: scheduledAlarmDisplayTime
+            )
+        }
+        repeatAlarmControlWrite { [weak self] in
+            guard let self else { return }
+            if let intensityControl = self.intensityCharacteristic {
+                self.writeControlValue(Data([0]), for: intensityControl)
+            }
+            if let speakerControl = self.speakerControlCharacteristic {
+                self.writeControlValue(Data([0]), for: speakerControl)
+            }
+            if let characteristic = self.alarmControlCharacteristic {
+                self.writeControlValue(Data([1]), for: characteristic)
+            }
+        }
     }
 
     // MARK: - Vibration Test
@@ -234,45 +391,56 @@ class BluetoothViewModel: NSObject, ObservableObject {
     }
 
     func setAlarmSoundEnabled(_ enabled: Bool) {
-        guard let characteristic = speakerControlCharacteristic else { return }
         alarmSoundEnabled = enabled
         let cmd: UInt8 = enabled ? 3 : 2
-        writeValue(Data([cmd]), for: characteristic)
+        sendSpeakerCommand(Data([cmd]), repeats: 2)
     }
 
     func playSpeakerTestTone() {
-        guard let characteristic = speakerControlCharacteristic else { return }
         let freq = UInt16(min(max(testToneFrequency, 100), 5000))
         let lo = UInt8(freq & 0xFF)
         let hi = UInt8(freq >> 8)
-        writeValue(Data([1, lo, hi]), for: characteristic)
+        sendSpeakerCommand(Data([1, lo, hi]))
     }
 
-    func playUploadedVoiceAlarm() {
-        guard let characteristic = speakerControlCharacteristic else { return }
-        writeValue(Data([4]), for: characteristic)
+    func playUploadedVoicePreview() {
+        sendSpeakerCommand(Data([4]))
     }
 
-    func uploadVoiceAlarmPCM(_ pcmData: Data, completion: @escaping (Bool) -> Void) {
+    func syncDeviceAlarmAudio(_ pcmData: Data, sampleRate: Int, completion: @escaping (Bool) -> Void) {
+        guard !hasDisabledVoiceUploadWrites else {
+            voiceUploadStatus = "Device voice sync unavailable. Built-in device alarm sound will be used."
+            completion(false)
+            return
+        }
+
         guard let characteristic = voiceUploadCharacteristic, let peripheral = alarmClockPeripheral else {
-            voiceUploadStatus = "Voice upload characteristic unavailable"
+            voiceUploadStatus = "Device voice sync unavailable. Built-in device alarm sound will be used."
             completion(false)
             return
         }
 
         if pcmData.isEmpty {
-            voiceUploadStatus = "No audio to upload"
+            voiceUploadStatus = "No generated audio to sync"
             completion(false)
             return
         }
 
-        let maxWrite = peripheral.maximumWriteValueLength(for: .withResponse)
+        guard let selectedWriteType = writeType(for: characteristic, preferWithoutResponse: true) else {
+            voiceUploadStatus = "Device voice sync unavailable. Built-in device alarm sound will be used."
+            completion(false)
+            return
+        }
+
+        let maxWrite = peripheral.maximumWriteValueLength(for: selectedWriteType)
         let chunkSize = max(8, min(180, maxWrite - 1))
 
         var packets: [Data] = []
         var begin = Data([1])
         var byteCount = UInt32(pcmData.count).littleEndian
         withUnsafeBytes(of: &byteCount) { begin.append(contentsOf: $0) }
+        var littleEndianSampleRate = UInt32(max(1, sampleRate)).littleEndian
+        withUnsafeBytes(of: &littleEndianSampleRate) { begin.append(contentsOf: $0) }
         packets.append(begin)
 
         var offset = 0
@@ -287,11 +455,117 @@ class BluetoothViewModel: NSObject, ObservableObject {
 
         voiceUploadPackets = packets
         voiceUploadPacketIndex = 0
+        voiceUploadWriteType = selectedWriteType
         voiceUploadCompletion = completion
         voiceUploadProgress = 0
-        voiceUploadStatus = "Uploading voice..."
+        voiceUploadStatus = "Syncing audio to device..."
+        voiceUploadDeadline = Date().addingTimeInterval(20)
 
-        peripheral.writeValue(packets[0], for: characteristic, type: .withResponse)
+        sendNextVoiceUploadPacket()
+    }
+
+    var batteryStatusText: String {
+        if let percent = batteryLevelPercent {
+            return "\(percent)%"
+        }
+        return hasBatteryTelemetry ? "No battery detected" : "Not available"
+    }
+
+    private func sendNextVoiceUploadPacket() {
+        guard let peripheral = alarmClockPeripheral,
+              let characteristic = voiceUploadCharacteristic,
+              let writeType = voiceUploadWriteType else { return }
+
+        voiceUploadRetryWorkItem?.cancel()
+        voiceUploadRetryWorkItem = nil
+
+        if let deadline = voiceUploadDeadline, Date() > deadline {
+            finishVoiceUpload(success: false)
+            return
+        }
+
+        if writeType == .withResponse {
+            guard voiceUploadPacketIndex < voiceUploadPackets.count else {
+                finishVoiceUpload(success: true)
+                return
+            }
+            peripheral.writeValue(voiceUploadPackets[voiceUploadPacketIndex], for: characteristic, type: .withResponse)
+            return
+        }
+
+        while voiceUploadPacketIndex < voiceUploadPackets.count {
+            if !peripheral.canSendWriteWithoutResponse {
+                scheduleVoiceUploadRetry()
+                return
+            }
+            peripheral.writeValue(
+                voiceUploadPackets[voiceUploadPacketIndex],
+                for: characteristic,
+                type: .withoutResponse
+            )
+            voiceUploadPacketIndex += 1
+            if !voiceUploadPackets.isEmpty {
+                voiceUploadProgress = Double(voiceUploadPacketIndex) / Double(voiceUploadPackets.count)
+            }
+        }
+
+        finishVoiceUpload(success: true)
+    }
+
+    private func scheduleVoiceUploadRetry() {
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.sendNextVoiceUploadPacket()
+        }
+        voiceUploadRetryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: workItem)
+    }
+
+    private func finishVoiceUpload(success: Bool) {
+        voiceUploadRetryWorkItem?.cancel()
+        voiceUploadRetryWorkItem = nil
+        voiceUploadDeadline = nil
+
+        if success {
+            voiceUploadStatus = "Audio synced to device"
+            voiceUploadProgress = voiceUploadPackets.isEmpty ? 0 : 1
+        } else {
+            voiceUploadStatus = "Device voice sync unavailable. Built-in device alarm sound will be used."
+            voiceUploadProgress = 0
+        }
+
+        voiceUploadPackets = []
+        voiceUploadPacketIndex = 0
+        voiceUploadWriteType = nil
+        let completion = voiceUploadCompletion
+        voiceUploadCompletion = nil
+        completion?(success)
+    }
+
+    private func clearLocalAlarmFallback() {
+        localAlarmFallbackWorkItem?.cancel()
+        localAlarmFallbackWorkItem = nil
+        localAlarmFallbackActive = false
+    }
+
+    private func scheduleLocalAlarmFallback(for fireDate: Date, displayTime: String?) {
+        clearLocalAlarmFallback()
+
+        let delay = fireDate.timeIntervalSinceNow
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            if !self.alarmFiring {
+                self.localAlarmFallbackActive = true
+                self.hasVerifiedLiveAlarm = false
+                self.liveAlarmVerificationMessage = "Alarm time reached for \(displayTime ?? "scheduled time"), but the device did not confirm start."
+            }
+        }
+        localAlarmFallbackWorkItem = workItem
+
+        if delay <= 0 {
+            DispatchQueue.main.async(execute: workItem)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        }
     }
 }
 
@@ -331,17 +605,27 @@ extension BluetoothViewModel: CBCentralManagerDelegate {
         speakerVolumeCharacteristic = nil
         speakerControlCharacteristic = nil
         voiceUploadCharacteristic = nil
+        timeSyncCharacteristic = nil
+        batteryLevelCharacteristic = nil
         hasDRV2605L = false
         hasSpeakerAmp = false
+        batteryLevelPercent = nil
         alarmFiring = false
         voiceUploadPackets = []
         voiceUploadPacketIndex = 0
         voiceUploadCompletion = nil
         voiceUploadProgress = 0
         voiceUploadStatus = ""
+        voiceUploadWriteType = nil
+        hasDisabledTimeSyncWrites = false
+        hasDisabledVoiceUploadWrites = false
+        canSyncGeneratedAudioToDevice = false
+        hasBatteryTelemetry = false
         hasVerifiedLiveAlarm = false
         liveAlarmVerificationMessage = ""
         pendingAlarmDisplayTime = nil
+        scheduledAlarmDisplayTime = nil
+        clearLocalAlarmFallback()
 
         if !userDisconnectRequested && reconnectAttempts < maxReconnectAttempts {
             reconnectAttempts += 1
@@ -399,6 +683,14 @@ extension BluetoothViewModel: CBPeripheralDelegate {
                 speakerControlCharacteristic = characteristic
             case VOICE_UPLOAD_CHARACTERISTIC_UUID:
                 voiceUploadCharacteristic = characteristic
+                canSyncGeneratedAudioToDevice = writeType(for: characteristic, preferWithoutResponse: false) != nil
+            case TIME_SYNC_CHARACTERISTIC_UUID:
+                timeSyncCharacteristic = characteristic
+            case BATTERY_LEVEL_CHARACTERISTIC_UUID:
+                batteryLevelCharacteristic = characteristic
+                hasBatteryTelemetry = true
+                peripheral.readValue(for: characteristic)
+                peripheral.setNotifyValue(true, for: characteristic)
             default:
                 break
             }
@@ -406,33 +698,36 @@ extension BluetoothViewModel: CBPeripheralDelegate {
 
         if alarmCharacteristic != nil {
             connectionStatus = "Connected"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                self.refreshAudioRoute()
-                if !self.isAwakenAudioRouteActive {
-                    self.audioRouteStatus = "Select a device named Awaken-Stream-Hybrid-XXXX in iOS Bluetooth settings"
-                }
-            }
+            sendTimeSync()
         }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
-            print("Write error: \(error.localizedDescription)")
+            print("Write error for \(characteristic.uuid): \(error.localizedDescription)")
 
             if characteristic.uuid == ALARM_CHARACTERISTIC_UUID {
                 hasVerifiedLiveAlarm = false
                 liveAlarmVerificationMessage = "Alarm set failed: \(error.localizedDescription)"
                 pendingAlarmDisplayTime = nil
+                scheduledAlarmDisplayTime = nil
+                clearLocalAlarmFallback()
             }
 
             if characteristic.uuid == VOICE_UPLOAD_CHARACTERISTIC_UUID {
-                voiceUploadStatus = "Voice upload failed"
-                voiceUploadPackets = []
-                voiceUploadPacketIndex = 0
-                voiceUploadProgress = 0
-                let completion = voiceUploadCompletion
-                voiceUploadCompletion = nil
-                completion?(false)
+                if voiceUploadWriteType == .withResponse &&
+                    characteristic.properties.contains(.writeWithoutResponse) {
+                    voiceUploadWriteType = .withoutResponse
+                    sendNextVoiceUploadPacket()
+                    return
+                }
+                hasDisabledVoiceUploadWrites = true
+                canSyncGeneratedAudioToDevice = false
+                finishVoiceUpload(success: false)
+            }
+
+            if characteristic.uuid == TIME_SYNC_CHARACTERISTIC_UUID {
+                hasDisabledTimeSyncWrites = true
             }
             return
         }
@@ -450,23 +745,12 @@ extension BluetoothViewModel: CBPeripheralDelegate {
             if !voiceUploadPackets.isEmpty {
                 voiceUploadProgress = Double(voiceUploadPacketIndex) / Double(voiceUploadPackets.count)
             }
-
-            if voiceUploadPacketIndex >= voiceUploadPackets.count {
-                voiceUploadStatus = "Voice uploaded"
-                voiceUploadPackets = []
-                voiceUploadPacketIndex = 0
-                voiceUploadProgress = 1
-                let completion = voiceUploadCompletion
-                voiceUploadCompletion = nil
-                completion?(true)
-            } else if let uploadCharacteristic = voiceUploadCharacteristic {
-                peripheral.writeValue(
-                    voiceUploadPackets[voiceUploadPacketIndex],
-                    for: uploadCharacteristic,
-                    type: .withResponse
-                )
-            }
+            sendNextVoiceUploadPacket()
         }
+    }
+
+    func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+        sendNextVoiceUploadPacket()
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -478,6 +762,11 @@ extension BluetoothViewModel: CBPeripheralDelegate {
                 self.hasSpeakerAmp = (data[0] & 0x02) != 0
             case ALARM_STATE_CHARACTERISTIC_UUID:
                 self.alarmFiring = (data[0] == 1)
+                if self.alarmFiring {
+                    self.localAlarmFallbackActive = false
+                }
+            case BATTERY_LEVEL_CHARACTERISTIC_UUID:
+                self.batteryLevelPercent = data[0] <= 100 ? Int(data[0]) : nil
             default:
                 break
             }

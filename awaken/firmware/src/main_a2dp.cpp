@@ -3,7 +3,15 @@
 #include <driver/i2s.h>
 #include <esp_system.h>
 
-// MAX98357A digital I2S amplifier wiring.
+#if defined(TARGET_BOARD_ADAFRUIT_FEATHER_ESP32_V2)
+static constexpr const char *BOARD_NAME = "Adafruit Feather ESP32 V2";
+#elif defined(TARGET_BOARD_ESP32_WROOM_32E)
+static constexpr const char *BOARD_NAME = "ESP32-WROOM-32E";
+#else
+static constexpr const char *BOARD_NAME = "Original ESP32";
+#endif
+
+// Feather ESP32 V2 and generic original ESP32 modules both use the same wiring here.
 static constexpr i2s_port_t I2S_PORT = I2S_NUM_0;
 static constexpr int I2S_BCLK_PIN = 26;
 static constexpr int I2S_LRCLK_PIN = 27;
@@ -25,7 +33,9 @@ void setup() {
     delay(250);
     initDeviceName();
     Serial.println();
-    Serial.println("Awaken A2DP sink (ESP32-WROOM-32E + MAX98357A)");
+    Serial.print("Awaken A2DP sink (");
+    Serial.print(BOARD_NAME);
+    Serial.println(" + MAX98357A)");
     Serial.println("Audio out: I2S BCLK=26 LRCLK=27 DOUT=25");
 
     i2s_config_t i2sConfig = {
