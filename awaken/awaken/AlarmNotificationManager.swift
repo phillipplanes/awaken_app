@@ -84,7 +84,7 @@ final class AlarmNotificationManager: NSObject, UNUserNotificationCenterDelegate
             await cancelPhoneAlarm()
 
             let content = UNMutableNotificationContent()
-            content.title = "Awaken Alarm"
+            content.title = "AWAKEN Alarm"
             content.body = displayTime.map { "Alarm for \($0)" } ?? "Your alarm is going off."
             content.sound = notificationSound
             content.categoryIdentifier = categoryIdentifier
@@ -112,7 +112,7 @@ final class AlarmNotificationManager: NSObject, UNUserNotificationCenterDelegate
             await requestAuthorizationIfNeeded()
 
             let content = UNMutableNotificationContent()
-            content.title = "Awaken Alarm"
+            content.title = "AWAKEN Alarm"
             content.body = "Wake up! Your alarm is going off."
             content.sound = notificationSound
             content.categoryIdentifier = categoryIdentifier

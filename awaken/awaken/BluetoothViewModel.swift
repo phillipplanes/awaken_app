@@ -160,7 +160,7 @@ class BluetoothViewModel: NSObject, ObservableObject {
         let isAwakenRouteActive = hasAwakenName || hasA2DPRoute
         let status: String
         if hasAwakenName {
-            status = "Awaken-Stream selected"
+            status = "AWAKEN-Stream selected"
         } else if hasA2DPRoute {
             status = "Bluetooth A2DP active: \(outputName)"
         } else {
@@ -269,7 +269,7 @@ class BluetoothViewModel: NSObject, ObservableObject {
     }
 
     // MARK: - Alarm
-    func setAlarm(time: Date) {
+    func setAlarm(time: Date, repeatDays: Set<Int> = []) {
         guard let characteristic = alarmCharacteristic else {
             hasVerifiedLiveAlarm = false
             liveAlarmVerificationMessage = "Alarm set failed: device not ready"
@@ -282,9 +282,23 @@ class BluetoothViewModel: NSObject, ObservableObject {
         payloadFormatter.dateFormat = "HH:mm"
         let timeString = payloadFormatter.string(from: time)
         let now = Date()
-        let target = time <= now ? time.addingTimeInterval(24 * 60 * 60) : time
+        let target: Date
+        if repeatDays.isEmpty {
+            target = time <= now ? time.addingTimeInterval(24 * 60 * 60) : time
+        } else {
+            target = nextOccurrence(of: time, on: repeatDays, after: now)
+        }
         let delaySeconds = max(1, Int(target.timeIntervalSince(now)))
-        let payload = "\(timeString)|\(delaySeconds)"
+
+        // Build repeat bitmask: bit0=Sun(1), bit1=Mon(2), ..., bit6=Sat(7)
+        var repeatMask = 0
+        for day in repeatDays {
+            let bit = day - 1 // Convert 1-based weekday to 0-based bit index
+            if bit >= 0 && bit <= 6 {
+                repeatMask |= (1 << bit)
+            }
+        }
+        let payload = "\(timeString)|\(delaySeconds)|\(repeatMask)"
 
         let displayFormatter = DateFormatter()
         displayFormatter.dateFormat = "h:mm a"
@@ -314,12 +328,37 @@ class BluetoothViewModel: NSObject, ObservableObject {
         }
     }
 
+    /// Find the next Date matching any of the given weekdays (1=Sun..7=Sat) at the same time-of-day.
+    private func nextOccurrence(of time: Date, on weekdays: Set<Int>, after now: Date) -> Date {
+        let calendar = Calendar.current
+        let timeComponents = calendar.dateComponents([.hour, .minute], from: time)
+        for dayOffset in 0..<8 {
+            guard let candidate = calendar.date(byAdding: .day, value: dayOffset, to: now) else { continue }
+            var components = calendar.dateComponents([.year, .month, .day], from: candidate)
+            components.hour = timeComponents.hour
+            components.minute = timeComponents.minute
+            components.second = 0
+            guard let target = calendar.date(from: components) else { continue }
+            if target <= now { continue }
+            let weekday = calendar.component(.weekday, from: target) // 1=Sun..7=Sat
+            if weekdays.contains(weekday) {
+                return target
+            }
+        }
+        // Fallback: tomorrow
+        return time.addingTimeInterval(24 * 60 * 60)
+    }
+
     private func sendTimeSync() {
         if hasDisabledTimeSyncWrites { return }
         guard let characteristic = timeSyncCharacteristic else { return }
+        let now = Date()
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
-        let payload = formatter.string(from: Date())
+        let timeStr = formatter.string(from: now)
+        // Append day-of-week: 0=Sun, 1=Mon, ..., 6=Sat
+        let dow = Calendar.current.component(.weekday, from: now) - 1 // Calendar weekday is 1=Sun
+        let payload = "\(timeStr)|\(dow)"
         guard let data = payload.data(using: .utf8) else { return }
         _ = writeValue(data, for: characteristic)
     }

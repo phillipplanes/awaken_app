@@ -3,7 +3,9 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var theme: AppTheme
-    @State private var profile = UserProfile.load()
+    @State private var firstName: String = UserProfile.load().firstName
+    @State private var motivations: Set<String> = UserProfile.load().motivations
+    @State private var stressors: Set<String> = UserProfile.load().stressors
     @State private var showResetConfirmation = false
     var onReset: (() -> Void)?
 
@@ -34,7 +36,7 @@ struct SettingsView: View {
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundColor(textSecondary)
 
-                            TextField("First name", text: $profile.firstName)
+                            TextField("First name", text: $firstName)
                                 .font(.title3)
                                 .padding(14)
                                 .background(controlFill)
@@ -53,11 +55,11 @@ struct SettingsView: View {
                                 .foregroundColor(textSecondary)
 
                             ForEach(UserProfile.motivationOptions, id: \.self) { option in
-                                checkRow(option, isSelected: profile.motivations.contains(option)) {
-                                    if profile.motivations.contains(option) {
-                                        profile.motivations.remove(option)
+                                checkRow(option, isSelected: motivations.contains(option)) {
+                                    if motivations.contains(option) {
+                                        motivations.remove(option)
                                     } else {
-                                        profile.motivations.insert(option)
+                                        motivations.insert(option)
                                     }
                                 }
                             }
@@ -70,11 +72,11 @@ struct SettingsView: View {
                                 .foregroundColor(textSecondary)
 
                             ForEach(UserProfile.stressorOptions, id: \.self) { option in
-                                checkRow(option, isSelected: profile.stressors.contains(option)) {
-                                    if profile.stressors.contains(option) {
-                                        profile.stressors.remove(option)
+                                checkRow(option, isSelected: stressors.contains(option)) {
+                                    if stressors.contains(option) {
+                                        stressors.remove(option)
                                     } else {
-                                        profile.stressors.insert(option)
+                                        stressors.insert(option)
                                     }
                                 }
                             }
@@ -120,7 +122,7 @@ struct SettingsView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") {
-                        profile.save()
+                        saveProfile()
                         dismiss()
                     }
                     .fontWeight(.semibold)
@@ -141,6 +143,14 @@ struct SettingsView: View {
         } message: {
             Text("This will clear your name, motivations, and stressors, and return to the setup screens.")
         }
+    }
+
+    private func saveProfile() {
+        var profile = UserProfile.load()
+        profile.firstName = firstName
+        profile.motivations = motivations
+        profile.stressors = stressors
+        profile.save()
     }
 
     private func checkRow(_ title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {

@@ -130,11 +130,13 @@ long alarmMinute = -1;
 bool alarmIsSet = false;
 bool alarmIsTriggered = false;
 bool alarmFiring = false;
+uint8_t alarmRepeatMask = 0; // bitmask: bit0=Sun, bit1=Mon, ..., bit6=Sat
 bool hasValidTime = false;
 bool hasAppTime = false;
 unsigned long alarmDeadlineMs = 0;
 unsigned long appTimeSyncMillis = 0;
 uint32_t appTimeSyncSecOfDay = 0;
+int appTimeSyncDayOfWeek = -1; // 0=Sun, 1=Mon, ..., 6=Sat
 
 const char* uploadedVoiceFile = "/voice_alarm.pcm";
 const char* defaultRingtoneFile = "/ringtone0.pcm";
@@ -710,6 +712,20 @@ bool getAppTimeHm(int &hour, int &minute) {
     return true;
 }
 
+// Returns current day of week (0=Sun..6=Sat), or -1 if unknown
+int getCurrentDayOfWeek() {
+    if (hasAppTime && appTimeSyncDayOfWeek >= 0) {
+        unsigned long elapsedSec = (millis() - appTimeSyncMillis) / 1000UL;
+        uint32_t totalSec = appTimeSyncSecOfDay + elapsedSec;
+        int dayRollover = (int)(totalSec / 86400UL);
+        return (appTimeSyncDayOfWeek + dayRollover) % 7;
+    }
+    if (hasValidTime) {
+        return timeClient.getDay(); // 0=Sun
+    }
+    return -1;
+}
+
 void playSpeakerTone(uint16_t frequencyHz, uint16_t durationMs) {
     if (speakerVolume == 0 || frequencyHz == 0 || durationMs == 0) return;
     bool needRelease = !localAudioOwnsI2S;
@@ -782,7 +798,6 @@ void triggerAlarm() {
 
 void stopAlarm() {
     alarmFiring = false;
-    alarmIsSet = false;
     alarmIsTriggered = false;
     alarmDeadlineMs = 0;
     notifyAlarmState(0);
@@ -792,7 +807,18 @@ void stopAlarm() {
     alarmTriggeredAtMs = 0;
     lastAlarmHapticPulseMs = 0;
     lastAlarmFallbackToneMs = 0;
-    Serial.println("Alarm stopped");
+
+    if (alarmRepeatMask != 0) {
+        // Re-arm for next matching day
+        alarmIsSet = true;
+        alarmIsTriggered = false;
+        Serial.print("Alarm re-armed (repeat mask=0x");
+        Serial.print(alarmRepeatMask, HEX);
+        Serial.println(")");
+    } else {
+        alarmIsSet = false;
+        Serial.println("Alarm stopped");
+    }
 }
 
 void snoozeAlarm() {
@@ -972,12 +998,32 @@ class AlarmCallback: public BLECharacteristicCallbacks {
             } else {
                 alarmDeadlineMs = 0;
             }
+
+            // Parse optional repeat mask: "HH:mm|delaySec|repeatMask"
+            alarmRepeatMask = 0;
+            int pipeCount = 0;
+            size_t lastPipe = 0;
+            for (size_t i = 0; i < value.size(); i++) {
+                if (value[i] == '|') {
+                    pipeCount++;
+                    lastPipe = i;
+                }
+            }
+            if (pipeCount >= 2 && lastPipe + 1 < value.size()) {
+                alarmRepeatMask = (uint8_t)atoi(value.c_str() + lastPipe + 1);
+            }
+
             Serial.print("Alarm set for: ");
             if (alarmHour < 10) Serial.print("0");
             Serial.print(alarmHour);
             Serial.print(":");
             if (alarmMinute < 10) Serial.print("0");
-            Serial.println(alarmMinute);
+            Serial.print(alarmMinute);
+            if (alarmRepeatMask != 0) {
+                Serial.print(" repeat=0x");
+                Serial.print(alarmRepeatMask, HEX);
+            }
+            Serial.println();
             if (!hasValidTime && alarmDeadlineMs > 0) {
                 Serial.print("Alarm fallback countdown sec=");
                 Serial.println(delaySec);
@@ -1288,10 +1334,20 @@ class TimeSyncCallback: public BLECharacteristicCallbacks {
         appTimeSyncSecOfDay = secOfDay;
         appTimeSyncMillis = millis();
         hasAppTime = true;
+
+        // Parse optional day-of-week after pipe: "HH:MM:SS|dow"
+        size_t pipePos = value.find('|');
+        if (pipePos != std::string::npos && pipePos + 1 < value.size()) {
+            int dow = atoi(value.c_str() + pipePos + 1);
+            if (dow >= 0 && dow <= 6) {
+                appTimeSyncDayOfWeek = dow;
+            }
+        }
+
         int hh = (int)(secOfDay / 3600UL);
         int mm = (int)((secOfDay % 3600UL) / 60UL);
         int ss = (int)(secOfDay % 60UL);
-        Serial.printf("App time synced: %02d:%02d:%02d\n", hh, mm, ss);
+        Serial.printf("App time synced: %02d:%02d:%02d dow=%d\n", hh, mm, ss, appTimeSyncDayOfWeek);
     }
 };
 
@@ -1528,7 +1584,17 @@ void loop() {
 
         if (!shouldTriggerAlarm && hasCurrentTime) {
             if (currentHour == alarmHour && currentMinute == alarmMinute) {
-                shouldTriggerAlarm = true;
+                // For repeating alarms, check day-of-week matches
+                if (alarmRepeatMask != 0) {
+                    int dow = getCurrentDayOfWeek();
+                    if (dow >= 0 && (alarmRepeatMask & (1 << dow))) {
+                        shouldTriggerAlarm = true;
+                    }
+                    // If we can't determine day, skip time-based trigger
+                    // (deadline fallback still works)
+                } else {
+                    shouldTriggerAlarm = true;
+                }
             }
         }
 

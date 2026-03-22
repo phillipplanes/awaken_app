@@ -58,8 +58,17 @@ struct OnboardingView: View {
                 .font(.system(size: 52, weight: .bold, design: .rounded))
                 .foregroundColor(textPrimary)
 
-            Text("What's your\nname?")
-                .font(.system(size: 38, weight: .semibold, design: .rounded))
+            Text("Time to")
+                .font(.system(size: 32, weight: .semibold, design: .default))
+                .foregroundColor(textSecondary)
+
+            Text("AWAKEN")
+                .font(.system(size: 48, weight: .black, design: .default))
+                .tracking(4)
+                .foregroundColor(accent)
+
+            Text("What's your\nfirst name?")
+                .font(.system(size: 32, weight: .semibold, design: .rounded))
                 .foregroundColor(textSecondary)
                 .multilineTextAlignment(.center)
 

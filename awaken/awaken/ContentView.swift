@@ -56,7 +56,7 @@ enum AlarmAudioOutput: String, CaseIterable, Identifiable {
         case .phone:
             return "Play the generated voice through this phone while the app stays connected."
         case .deviceSpeaker:
-            return "Upload the generated voice to Awaken and let the device play it directly, even if the phone is locked."
+            return "Upload the generated voice to AWAKEN and let the device play it directly, even if the phone is locked."
         }
     }
 }
@@ -143,7 +143,7 @@ struct ContentView: View {
                             .foregroundColor(accentDeep)
                     }
 
-                    Text("Searching for Awaken")
+                    Text("Searching for AWAKEN")
                         .font(.title2.weight(.semibold))
 
                     Text(viewModel.connectionStatus)
@@ -190,7 +190,7 @@ struct ContentView: View {
                                         Text(peripheral.name ?? "Unknown Device")
                                             .font(.body.weight(.medium))
                                             .foregroundColor(textPrimary)
-                                        Text("Awaken Alarm Clock")
+                                        Text("AWAKEN Alarm Clock")
                                             .font(.caption)
                                             .foregroundColor(textSecondary)
                                     }
@@ -219,7 +219,7 @@ struct ContentView: View {
                 Spacer()
             }
             .toolbarBackground(.hidden, for: .navigationBar)
-            .navigationTitle("Awaken")
+            .navigationTitle("AWAKEN")
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button {
@@ -246,541 +246,23 @@ struct ContentView: View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 16) {
-
-                    // Verified live alarm banner
-                    if !viewModel.liveAlarmVerificationMessage.isEmpty {
-                        HStack(spacing: 8) {
-                            Image(systemName: viewModel.hasVerifiedLiveAlarm ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                                .foregroundColor(viewModel.hasVerifiedLiveAlarm ? accent : warmHighlight)
-                            Text(viewModel.liveAlarmVerificationMessage)
-                                .font(.subheadline.weight(.medium))
-                                .foregroundColor(accentDeep)
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .frame(maxWidth: .infinity)
-                        .background((viewModel.hasVerifiedLiveAlarm ? accentSoft : warmHighlight.opacity(0.35)))
-                        .cornerRadius(12)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                    }
-
-                    sectionCard {
-                        Label("Connection Status", systemImage: "dot.radiowaves.left.and.right")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundColor(textSecondary)
-
-                        HStack(spacing: 10) {
-                            Image(systemName: isConnected ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                .foregroundColor(isConnected ? successTint : dangerTint)
-                            Text("BLE (Awaken-Control)")
-                                .font(.subheadline)
-                            Spacer()
-                            Text(isConnected ? "Connected" : "Disconnected")
-                                .font(.caption)
-                                .foregroundColor(textSecondary)
-                        }
-                    }
-
-                    // --- Alarm Time ---
-                    sectionCard {
-                        Label("Alarm Time", systemImage: "alarm")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundColor(textSecondary)
-
-                        DatePicker("", selection: $alarmTime, displayedComponents: .hourAndMinute)
-                            .labelsHidden()
-                            .datePickerStyle(.wheel)
-                            .dynamicTypeSize(.accessibility5)
-                            .scaleEffect(x: 1.6, y: 1.6)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 300)
-                            .colorScheme(theme.isDark ? .dark : .light)
-                            .background(warmPaper)
-                            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                                    .stroke(cardStroke.opacity(0.9), lineWidth: 1)
-                            )
-                            .environment(\.colorScheme, .light)
-
-                        // Repeat days
-                        HStack(spacing: 6) {
-                            repeatDayButton(day: 2, label: "M")
-                            repeatDayButton(day: 3, label: "T")
-                            repeatDayButton(day: 4, label: "W")
-                            repeatDayButton(day: 5, label: "T")
-                            repeatDayButton(day: 6, label: "F")
-                            repeatDayButton(day: 7, label: "S")
-                            repeatDayButton(day: 1, label: "S")
-                        }
-                        .frame(maxWidth: .infinity)
-
-                        if !repeatDays.isEmpty {
-                            Text(repeatDaysSummary)
-                                .font(.caption)
-                                .foregroundColor(textSecondary)
-                        }
-
-                        Divider()
-
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: weatherViewModel.symbolName)
-                                .font(.title3)
-                                .foregroundColor(accent)
-                                .frame(width: 26)
-
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(weatherViewModel.forecastText)
-                                    .font(.subheadline.weight(.medium))
-                                Text(weatherViewModel.detailText)
-                                    .font(.caption)
-                                    .foregroundColor(textSecondary)
-                            }
-
-                            Spacer()
-
-                            if weatherViewModel.isLoading {
-                                ProgressView()
-                                    .controlSize(.small)
-                            }
-
-                            Button {
-                                Task {
-                                    await weatherViewModel.refreshNow(for: alarmTime)
-                                }
-                            } label: {
-                                Image(systemName: "arrow.clockwise")
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundColor(textSecondary)
-                        }
-                    }
-
-                    // --- Wake-Up Pattern ---
-                    sectionCard {
-                        Label("Wake-Up Pattern", systemImage: "waveform.path")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundColor(textSecondary)
-
-                        Text("Choose the vibration style the alarm will use")
-                            .font(.caption)
-                            .foregroundColor(textSecondary)
-
-                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
-                            ForEach(wakeEffects) { effect in
-                                Button {
-                                    selectedWakeEffect = effect.id
-                                    viewModel.setWakeEffect(effect.id)
-                                } label: {
-                                    VStack(spacing: 6) {
-                                        Image(systemName: effect.icon)
-                                            .font(.title3)
-                                        Text(effect.name)
-                                            .font(.caption2.weight(.medium))
-                                            .lineLimit(1)
-                                    }
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 12)
-                                    .background(
-                                        selectedWakeEffect == effect.id
-                                            ? accent.opacity(0.12)
-                                            : controlFill
-                                    )
-                                    .foregroundColor(
-                                        selectedWakeEffect == effect.id ? accent : textPrimary
-                                    )
-                                    .cornerRadius(10)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 10)
-                                            .stroke(
-                                                selectedWakeEffect == effect.id ? accent : Color.clear,
-                                                lineWidth: 1.5
-                                            )
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    // --- Voice Message ---
-                    sectionCard {
-                        Label("Voice Message", systemImage: "mic.fill")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundColor(textSecondary)
-
-                        Picker("Alarm Type", selection: $alarmType) {
-                            ForEach(AlarmType.allCases) { type in
-                                Text(type.title).tag(type)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-
-                        Picker("Voice", selection: $voiceOption) {
-                            ForEach(VoiceOption.allCases) { voice in
-                                Text(voice.title).tag(voice)
-                            }
-                        }
-
-                        Text(voiceMessageViewModel.status.label)
-                            .font(.caption)
-                            .foregroundColor(textSecondary)
-
-                        if !voiceMessageViewModel.scriptText.isEmpty {
-                            Text(voiceMessageViewModel.scriptText)
-                                .font(.subheadline)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(10)
-                                .background(controlFill)
-                                .cornerRadius(10)
-                        }
-
-                        HStack(spacing: 10) {
-                            Button {
-                                Task {
-                                    await voiceMessageViewModel.generate(
-                                        alarmType: alarmType,
-                                        alarmTime: alarmTime,
-                                        weatherSummary: weatherSummary,
-                                        voice: voiceOption.rawValue
-                                    )
-                                }
-                            } label: {
-                                Label("AI Generate", systemImage: "wand.and.stars")
-                                    .font(.subheadline.weight(.semibold))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 10)
-                                    .background(controlFill)
-                                    .cornerRadius(10)
-                            }
-                            .foregroundColor(textPrimary)
-
-                            if voiceMessageViewModel.isRecording {
-                                Button {
-                                    voiceMessageViewModel.stopRecording()
-                                } label: {
-                                    Label("Stop (\(voiceMessageViewModel.recordingTimeRemaining)s)", systemImage: "stop.circle.fill")
-                                        .font(.subheadline.weight(.semibold))
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 10)
-                                        .background(Color.red.opacity(0.2))
-                                        .cornerRadius(10)
-                                }
-                                .foregroundColor(.red)
-                            } else {
-                                Button {
-                                    voiceMessageViewModel.startRecording()
-                                } label: {
-                                    Label("Record", systemImage: "mic.circle.fill")
-                                        .font(.subheadline.weight(.semibold))
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 10)
-                                        .background(controlFill)
-                                        .cornerRadius(10)
-                                }
-                                .foregroundColor(textPrimary)
-                            }
-
-                            Button {
-                                voiceMessageViewModel.playPreview()
-                            } label: {
-                                Label("Play", systemImage: "play.fill")
-                                    .font(.subheadline.weight(.semibold))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 10)
-                                    .background(controlFill)
-                                    .cornerRadius(10)
-                            }
-                            .foregroundColor(textPrimary)
-                        }
-
-                        if alarmAudioOutput == .deviceSpeaker {
-                            HStack(spacing: 10) {
-                                Button {
-                                    handleSyncToDevice()
-                                } label: {
-                                    Label("Sync to Device", systemImage: "hifispeaker.fill")
-                                        .font(.subheadline.weight(.semibold))
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 10)
-                                        .background(controlFill)
-                                        .cornerRadius(10)
-                                }
-                                .foregroundColor(textPrimary)
-
-                                Button {
-                                    viewModel.playUploadedVoiceOnDevice()
-                                } label: {
-                                    Label("Device Play", systemImage: "play.circle.fill")
-                                        .font(.subheadline.weight(.semibold))
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 10)
-                                        .background(controlFill)
-                                        .cornerRadius(10)
-                                }
-                                .foregroundColor(textPrimary)
-                            }
-                        }
-
-                    }
-
-                    sectionCard {
-                        Label("Alarm Audio", systemImage: "speaker.wave.3")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundColor(textSecondary)
-
-                        Picker("Play alarm on", selection: $alarmAudioOutput) {
-                            ForEach(AlarmAudioOutput.allCases) { output in
-                                Text(output.title).tag(output)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-
-                        Text(alarmAudioOutput.description)
-                            .font(.caption)
-                            .foregroundColor(textSecondary)
-
-                        if alarmAudioOutput == .deviceSpeaker && !viewModel.voiceUploadStatus.isEmpty {
-                            Text(viewModel.voiceUploadStatus)
-                                .font(.caption)
-                                .foregroundColor(textSecondary)
-                        }
-                    }
-
-                    // --- Set Alarm ---
-                    Button {
-                        handleSetAlarm()
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "alarm.fill")
-                            Text("Set Alarm")
-                                .fontWeight(.semibold)
-                        }
-                        .font(.title3)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 16)
-                        .background(
-                            LinearGradient(
-                                colors: [accent, accentDeep],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .foregroundColor(.white)
-                        .cornerRadius(14)
-                        .shadow(color: accent.opacity(0.22), radius: 16, x: 0, y: 10)
-                    }
-
-                    if let scheduledAlarmDisplayTime = viewModel.scheduledAlarmDisplayTime {
-                        sectionCard {
-                            Label("Scheduled Alarm", systemImage: "alarm.waves.left.and.right")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundColor(textSecondary)
-
-                            HStack {
-                                Text(scheduledAlarmDisplayTime)
-                                    .font(.title3.monospacedDigit())
-                                Spacer()
-                                Button(role: .destructive) {
-                                    voiceMessageViewModel.stopAlarmAudio()
-                                    viewModel.stopAlarm()
-                                } label: {
-                                    Text("Delete Alarm")
-                                        .font(.subheadline.weight(.semibold))
-                                }
-                            }
-                        }
-                    }
-
-                    // --- Test Vibration ---
-                    sectionCard {
-                        DisclosureGroup(isExpanded: $showTestSection) {
-                            VStack(spacing: 14) {
-                                // Intensity
-                                VStack(spacing: 6) {
-                                    HStack {
-                                        Text("Intensity")
-                                            .font(.subheadline)
-                                        Spacer()
-                                        Text("\(Int(viewModel.vibrationIntensity))%")
-                                            .font(.subheadline.monospacedDigit())
-                                            .foregroundColor(textSecondary)
-                                        Button("Stop") {
-                                            viewModel.vibrationIntensity = 0
-                                            viewModel.stopVibration()
-                                        }
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundColor(dangerTint)
-                                        .padding(.leading, 8)
-                                    }
-
-                                    Slider(value: $viewModel.vibrationIntensity, in: 0...100, step: 1)
-                                        .tint(accent)
-                                        .onChange(of: viewModel.vibrationIntensity) { oldValue, newValue in
-                                            intensityDebounce?.cancel()
-                                            let work = DispatchWorkItem {
-                                                viewModel.setVibrationIntensity(newValue)
-                                            }
-                                            intensityDebounce = work
-                                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
-                                        }
-                                }
-
-                                // Effects
-                                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                                    ForEach(testEffects) { effect in
-                                        Button {
-                                            viewModel.playEffect(effect.id)
-                                        } label: {
-                                            HStack(spacing: 6) {
-                                                Image(systemName: effect.icon)
-                                                    .font(.caption)
-                                                Text(effect.name)
-                                                    .font(.caption.weight(.medium))
-                                                    .lineLimit(1)
-                                            }
-                                            .frame(maxWidth: .infinity)
-                                            .padding(.vertical, 10)
-                                            .background(controlFill)
-                                            .foregroundColor(textPrimary)
-                                            .cornerRadius(8)
-                                        }
-                                    }
-                                }
-                            }
-                            .padding(.top, 12)
-                        } label: {
-                            Label("Test Vibration", systemImage: "sparkles")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundColor(textSecondary)
-                        }
-                        .tint(textSecondary)
-                    }
-
-                    // --- Device ---
-                    sectionCard {
-                        Label("Speaker", systemImage: "speaker.wave.2")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundColor(textSecondary)
-
-                        Text(
-                            alarmAudioOutput == .deviceSpeaker
-                                ? "These controls affect the onboard speaker."
-                                : "Phone output ignores device speaker volume."
-                        )
-                        .font(.caption)
-                        .foregroundColor(textSecondary)
-
-                        VStack(spacing: 6) {
-                            HStack {
-                                Text("Volume")
-                                    .font(.subheadline)
-                                Spacer()
-                                Text("\(Int(viewModel.speakerVolume))%")
-                                    .font(.subheadline.monospacedDigit())
-                                    .foregroundColor(textSecondary)
-                            }
-
-                            Slider(value: $viewModel.speakerVolume, in: 0...100, step: 1)
-                                .tint(accent)
-                                .onChange(of: viewModel.speakerVolume) { _, newValue in
-                                    speakerDebounce?.cancel()
-                                    let work = DispatchWorkItem {
-                                        viewModel.setSpeakerVolume(newValue)
-                                    }
-                                    speakerDebounce = work
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
-                                }
-                                .disabled(alarmAudioOutput != .deviceSpeaker)
-                        }
-
-                        VStack(spacing: 6) {
-                            HStack {
-                                Text("Test Frequency")
-                                    .font(.subheadline)
-                                Spacer()
-                                Text("\(Int(viewModel.testToneFrequency)) Hz")
-                                    .font(.subheadline.monospacedDigit())
-                                    .foregroundColor(textSecondary)
-                            }
-
-                            Slider(value: $viewModel.testToneFrequency, in: 300...2400, step: 10)
-                                .tint(accent)
-                        }
-
-                        Button {
-                            if alarmAudioOutput == .deviceSpeaker {
-                                viewModel.playSpeakerTestTone()
-                            } else {
-                                voiceMessageViewModel.playTestTone(frequencyHz: viewModel.testToneFrequency)
-                            }
-                        } label: {
-                            Label("Play Test Tone", systemImage: "play.fill")
-                                .font(.subheadline.weight(.semibold))
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 10)
-                                .background(controlFill)
-                                .cornerRadius(10)
-                        }
-                        .foregroundColor(textPrimary)
-                    }
-
-                    // --- Device ---
-                    sectionCard {
-                        Label("Device", systemImage: "cpu")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundColor(textSecondary)
-
-                        HStack(spacing: 10) {
-                            Image(systemName: viewModel.hasSpeakerAmp
-                                  ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                .foregroundColor(viewModel.hasSpeakerAmp ? successTint : dangerTint)
-                            Text("MAX98357A Amp")
-                                .font(.subheadline)
-                            Spacer()
-                            Text(viewModel.hasSpeakerAmp ? "Ready" : "Not Ready")
-                                .font(.caption)
-                                .foregroundColor(textSecondary)
-                        }
-
-                        HStack(spacing: 10) {
-                            Image(systemName: viewModel.hasDRV2605L
-                                  ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                .foregroundColor(viewModel.hasDRV2605L ? successTint : dangerTint)
-                            Text("Haptic Driver")
-                                .font(.subheadline)
-                            Spacer()
-                            Text(viewModel.hasDRV2605L ? "Connected" : "Not Found")
-                                .font(.caption)
-                                .foregroundColor(textSecondary)
-                        }
-
-                        HStack(spacing: 10) {
-                            Image(systemName: viewModel.batteryLevelPercent == nil ? "battery.25" : "battery.75")
-                                .foregroundColor(viewModel.batteryLevelPercent == nil ? cautionTint : successTint)
-                            Text("Battery")
-                                .font(.subheadline)
-                            Spacer()
-                            Text(viewModel.batteryStatusText)
-                                .font(.caption)
-                                .foregroundColor(textSecondary)
-                        }
-                    }
-
-                    // --- Disconnect ---
-                    Button {
-                        viewModel.disconnect()
-                    } label: {
-                        Text("Disconnect")
-                            .font(.subheadline)
-                            .foregroundColor(dangerTint)
-                    }
-                    .padding(.top, 4)
-                    .padding(.bottom, 24)
+                    alarmVerificationBanner
+                    alarmTimeSection
+                    wakeUpPatternSection
+                    voiceMessageSection
+                    alarmAudioSection
+                    setAlarmButton
+                    scheduledAlarmSection
+                    testVibrationSection
+                    speakerSection
+                    deviceStatusSection
+                    connectionStatusSection
+                    disconnectButton
                 }
                 .padding(.horizontal)
             }
             .toolbarBackground(.hidden, for: .navigationBar)
-            .navigationTitle("Awaken")
+            .navigationTitle("AWAKEN")
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button { showSettings = true } label: {
@@ -837,6 +319,551 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Connected View Sections
+
+    @ViewBuilder
+    private var alarmVerificationBanner: some View {
+        if !viewModel.liveAlarmVerificationMessage.isEmpty {
+            HStack(spacing: 8) {
+                Image(systemName: viewModel.hasVerifiedLiveAlarm ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundColor(viewModel.hasVerifiedLiveAlarm ? accent : warmHighlight)
+                Text(viewModel.liveAlarmVerificationMessage)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundColor(accentDeep)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity)
+            .background((viewModel.hasVerifiedLiveAlarm ? accentSoft : warmHighlight.opacity(0.35)))
+            .cornerRadius(12)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    private var alarmTimeSection: some View {
+        sectionCard {
+            Label("Alarm Time", systemImage: "alarm")
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(textSecondary)
+
+            DatePicker("", selection: $alarmTime, displayedComponents: .hourAndMinute)
+                .labelsHidden()
+                .datePickerStyle(.wheel)
+                .dynamicTypeSize(.accessibility5)
+                .scaleEffect(x: 1.6, y: 1.6)
+                .frame(maxWidth: .infinity)
+                .frame(height: 300)
+                .colorScheme(theme.isDark ? .dark : .light)
+                .background(warmPaper)
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(cardStroke.opacity(0.9), lineWidth: 1)
+                )
+                .environment(\.colorScheme, .light)
+
+            HStack(spacing: 6) {
+                repeatDayButton(day: 2, label: "M")
+                repeatDayButton(day: 3, label: "T")
+                repeatDayButton(day: 4, label: "W")
+                repeatDayButton(day: 5, label: "T")
+                repeatDayButton(day: 6, label: "F")
+                repeatDayButton(day: 7, label: "S")
+                repeatDayButton(day: 1, label: "S")
+            }
+            .frame(maxWidth: .infinity)
+
+            if !repeatDays.isEmpty {
+                Text(repeatDaysSummary)
+                    .font(.caption)
+                    .foregroundColor(textSecondary)
+            }
+
+            Divider()
+
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: weatherViewModel.symbolName)
+                    .font(.title3)
+                    .foregroundColor(accent)
+                    .frame(width: 26)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(weatherViewModel.forecastText)
+                        .font(.subheadline.weight(.medium))
+                    Text(weatherViewModel.detailText)
+                        .font(.caption)
+                        .foregroundColor(textSecondary)
+                }
+
+                Spacer()
+
+                if weatherViewModel.isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+
+                Button {
+                    Task {
+                        await weatherViewModel.refreshNow(for: alarmTime)
+                    }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(textSecondary)
+            }
+        }
+    }
+
+    private var wakeUpPatternSection: some View {
+        sectionCard {
+            Label("Wake-Up Pattern", systemImage: "waveform.path")
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(textSecondary)
+
+            Text("Choose the vibration style the alarm will use")
+                .font(.caption)
+                .foregroundColor(textSecondary)
+
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
+                ForEach(wakeEffects) { effect in
+                    Button {
+                        selectedWakeEffect = effect.id
+                        viewModel.setWakeEffect(effect.id)
+                    } label: {
+                        VStack(spacing: 6) {
+                            Image(systemName: effect.icon)
+                                .font(.title3)
+                            Text(effect.name)
+                                .font(.caption2.weight(.medium))
+                                .lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(
+                            selectedWakeEffect == effect.id
+                                ? accent.opacity(0.12)
+                                : controlFill
+                        )
+                        .foregroundColor(
+                            selectedWakeEffect == effect.id ? accent : textPrimary
+                        )
+                        .cornerRadius(10)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(
+                                    selectedWakeEffect == effect.id ? accent : Color.clear,
+                                    lineWidth: 1.5
+                                )
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private var voiceMessageSection: some View {
+        sectionCard {
+            Label("Voice Message", systemImage: "mic.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(textSecondary)
+
+            Picker("Alarm Type", selection: $alarmType) {
+                ForEach(AlarmType.allCases) { type in
+                    Text(type.title).tag(type)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Picker("Voice", selection: $voiceOption) {
+                ForEach(VoiceOption.allCases) { voice in
+                    Text(voice.title).tag(voice)
+                }
+            }
+
+            Text(voiceMessageViewModel.status.label)
+                .font(.caption)
+                .foregroundColor(textSecondary)
+
+            if !voiceMessageViewModel.scriptText.isEmpty {
+                Text(voiceMessageViewModel.scriptText)
+                    .font(.subheadline)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(controlFill)
+                    .cornerRadius(10)
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    Task {
+                        await voiceMessageViewModel.generate(
+                            alarmType: alarmType,
+                            alarmTime: alarmTime,
+                            weatherSummary: weatherSummary,
+                            voice: voiceOption.rawValue
+                        )
+                    }
+                } label: {
+                    Label("AI Generate", systemImage: "wand.and.stars")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(controlFill)
+                        .cornerRadius(10)
+                }
+                .foregroundColor(textPrimary)
+
+                if voiceMessageViewModel.isRecording {
+                    Button {
+                        voiceMessageViewModel.stopRecording()
+                    } label: {
+                        Label("Stop (\(voiceMessageViewModel.recordingTimeRemaining)s)", systemImage: "stop.circle.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color.red.opacity(0.2))
+                            .cornerRadius(10)
+                    }
+                    .foregroundColor(.red)
+                } else {
+                    Button {
+                        voiceMessageViewModel.startRecording()
+                    } label: {
+                        Label("Record", systemImage: "mic.circle.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(controlFill)
+                            .cornerRadius(10)
+                    }
+                    .foregroundColor(textPrimary)
+                }
+
+                Button {
+                    voiceMessageViewModel.playPreview()
+                } label: {
+                    Label("Play", systemImage: "play.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(controlFill)
+                        .cornerRadius(10)
+                }
+                .foregroundColor(textPrimary)
+            }
+
+            if alarmAudioOutput == .deviceSpeaker {
+                HStack(spacing: 10) {
+                    Button {
+                        handleSyncToDevice()
+                    } label: {
+                        Label("Sync to Device", systemImage: "hifispeaker.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(controlFill)
+                            .cornerRadius(10)
+                    }
+                    .foregroundColor(textPrimary)
+
+                    Button {
+                        viewModel.playUploadedVoiceOnDevice()
+                    } label: {
+                        Label("Device Play", systemImage: "play.circle.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(controlFill)
+                            .cornerRadius(10)
+                    }
+                    .foregroundColor(textPrimary)
+                }
+            }
+        }
+    }
+
+    private var alarmAudioSection: some View {
+        sectionCard {
+            Label("Alarm Audio", systemImage: "speaker.wave.3")
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(textSecondary)
+
+            Picker("Play alarm on", selection: $alarmAudioOutput) {
+                ForEach(AlarmAudioOutput.allCases) { output in
+                    Text(output.title).tag(output)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text(alarmAudioOutput.description)
+                .font(.caption)
+                .foregroundColor(textSecondary)
+
+            if alarmAudioOutput == .deviceSpeaker && !viewModel.voiceUploadStatus.isEmpty {
+                Text(viewModel.voiceUploadStatus)
+                    .font(.caption)
+                    .foregroundColor(textSecondary)
+            }
+        }
+    }
+
+    private var setAlarmButton: some View {
+        Button {
+            handleSetAlarm()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "alarm.fill")
+                Text("Set Alarm")
+                    .fontWeight(.semibold)
+            }
+            .font(.title3)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 16)
+            .background(
+                LinearGradient(
+                    colors: [accent, accentDeep],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .foregroundColor(.white)
+            .cornerRadius(14)
+            .shadow(color: accent.opacity(0.22), radius: 16, x: 0, y: 10)
+        }
+    }
+
+    @ViewBuilder
+    private var scheduledAlarmSection: some View {
+        if let scheduledAlarmDisplayTime = viewModel.scheduledAlarmDisplayTime {
+            sectionCard {
+                Label("Scheduled Alarm", systemImage: "alarm.waves.left.and.right")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(textSecondary)
+
+                HStack {
+                    Text(scheduledAlarmDisplayTime)
+                        .font(.title3.monospacedDigit())
+                    Spacer()
+                    Button(role: .destructive) {
+                        voiceMessageViewModel.stopAlarmAudio()
+                        viewModel.stopAlarm()
+                    } label: {
+                        Text("Delete Alarm")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                }
+            }
+        }
+    }
+
+    private var testVibrationSection: some View {
+        sectionCard {
+            DisclosureGroup(isExpanded: $showTestSection) {
+                VStack(spacing: 14) {
+                    VStack(spacing: 6) {
+                        HStack {
+                            Text("Intensity")
+                                .font(.subheadline)
+                            Spacer()
+                            Text("\(Int(viewModel.vibrationIntensity))%")
+                                .font(.subheadline.monospacedDigit())
+                                .foregroundColor(textSecondary)
+                            Button("Stop") {
+                                viewModel.vibrationIntensity = 0
+                                viewModel.stopVibration()
+                            }
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(dangerTint)
+                            .padding(.leading, 8)
+                        }
+
+                        Slider(value: $viewModel.vibrationIntensity, in: 0...100, step: 1)
+                            .tint(accent)
+                            .onChange(of: viewModel.vibrationIntensity) { oldValue, newValue in
+                                intensityDebounce?.cancel()
+                                let work = DispatchWorkItem {
+                                    viewModel.setVibrationIntensity(newValue)
+                                }
+                                intensityDebounce = work
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
+                            }
+                    }
+
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                        ForEach(testEffects) { effect in
+                            Button {
+                                viewModel.playEffect(effect.id)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: effect.icon)
+                                        .font(.caption)
+                                    Text(effect.name)
+                                        .font(.caption.weight(.medium))
+                                        .lineLimit(1)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(controlFill)
+                                .foregroundColor(textPrimary)
+                                .cornerRadius(8)
+                            }
+                        }
+                    }
+                }
+                .padding(.top, 12)
+            } label: {
+                Label("Test Vibration", systemImage: "sparkles")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(textSecondary)
+            }
+            .tint(textSecondary)
+        }
+    }
+
+    private var speakerSection: some View {
+        sectionCard {
+            Label("Speaker", systemImage: "speaker.wave.2")
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(textSecondary)
+
+            Text(
+                alarmAudioOutput == .deviceSpeaker
+                    ? "These controls affect the onboard speaker."
+                    : "Phone output ignores device speaker volume."
+            )
+            .font(.caption)
+            .foregroundColor(textSecondary)
+
+            VStack(spacing: 6) {
+                HStack {
+                    Text("Volume")
+                        .font(.subheadline)
+                    Spacer()
+                    Text("\(Int(viewModel.speakerVolume))%")
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundColor(textSecondary)
+                }
+
+                Slider(value: $viewModel.speakerVolume, in: 0...100, step: 1)
+                    .tint(accent)
+                    .onChange(of: viewModel.speakerVolume) { _, newValue in
+                        speakerDebounce?.cancel()
+                        let work = DispatchWorkItem {
+                            viewModel.setSpeakerVolume(newValue)
+                        }
+                        speakerDebounce = work
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
+                    }
+                    .disabled(alarmAudioOutput != .deviceSpeaker)
+            }
+
+            VStack(spacing: 6) {
+                HStack {
+                    Text("Test Frequency")
+                        .font(.subheadline)
+                    Spacer()
+                    Text("\(Int(viewModel.testToneFrequency)) Hz")
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundColor(textSecondary)
+                }
+
+                Slider(value: $viewModel.testToneFrequency, in: 300...2400, step: 10)
+                    .tint(accent)
+            }
+
+            Button {
+                if alarmAudioOutput == .deviceSpeaker {
+                    viewModel.playSpeakerTestTone()
+                } else {
+                    voiceMessageViewModel.playTestTone(frequencyHz: viewModel.testToneFrequency)
+                }
+            } label: {
+                Label("Play Test Tone", systemImage: "play.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(controlFill)
+                    .cornerRadius(10)
+            }
+            .foregroundColor(textPrimary)
+        }
+    }
+
+    private var deviceStatusSection: some View {
+        sectionCard {
+            Label("Device", systemImage: "cpu")
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(textSecondary)
+
+            HStack(spacing: 10) {
+                Image(systemName: viewModel.hasSpeakerAmp
+                      ? "checkmark.circle.fill" : "xmark.circle.fill")
+                    .foregroundColor(viewModel.hasSpeakerAmp ? successTint : dangerTint)
+                Text("MAX98357A Amp")
+                    .font(.subheadline)
+                Spacer()
+                Text(viewModel.hasSpeakerAmp ? "Ready" : "Not Ready")
+                    .font(.caption)
+                    .foregroundColor(textSecondary)
+            }
+
+            HStack(spacing: 10) {
+                Image(systemName: viewModel.hasDRV2605L
+                      ? "checkmark.circle.fill" : "xmark.circle.fill")
+                    .foregroundColor(viewModel.hasDRV2605L ? successTint : dangerTint)
+                Text("Haptic Driver")
+                    .font(.subheadline)
+                Spacer()
+                Text(viewModel.hasDRV2605L ? "Connected" : "Not Found")
+                    .font(.caption)
+                    .foregroundColor(textSecondary)
+            }
+
+            HStack(spacing: 10) {
+                Image(systemName: viewModel.batteryLevelPercent == nil ? "battery.25" : "battery.75")
+                    .foregroundColor(viewModel.batteryLevelPercent == nil ? cautionTint : successTint)
+                Text("Battery")
+                    .font(.subheadline)
+                Spacer()
+                Text(viewModel.batteryStatusText)
+                    .font(.caption)
+                    .foregroundColor(textSecondary)
+            }
+        }
+    }
+
+    private var connectionStatusSection: some View {
+        sectionCard {
+            Label("Connection Status", systemImage: "dot.radiowaves.left.and.right")
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(textSecondary)
+
+            HStack(spacing: 10) {
+                Image(systemName: isConnected ? "checkmark.circle.fill" : "xmark.circle.fill")
+                    .foregroundColor(isConnected ? successTint : dangerTint)
+                Text("BLE (AWAKEN-Control)")
+                    .font(.subheadline)
+                Spacer()
+                Text(isConnected ? "Connected" : "Disconnected")
+                    .font(.caption)
+                    .foregroundColor(textSecondary)
+            }
+        }
+    }
+
+    private var disconnectButton: some View {
+        Button {
+            viewModel.disconnect()
+        } label: {
+            Text("Disconnect")
+                .font(.subheadline)
+                .foregroundColor(dangerTint)
+        }
+        .padding(.top, 4)
+        .padding(.bottom, 24)
     }
 
     var alarmQuickActionsBar: some View {
@@ -1010,17 +1037,18 @@ struct ContentView: View {
 
     private func handleSetAlarm() {
         applyAlarmAudioOutput()
+        let days = repeatDays
         if alarmAudioOutput == .deviceSpeaker,
            let pcmData = voiceMessageViewModel.devicePCMData, !pcmData.isEmpty {
             let time = alarmTime
             let effect = selectedWakeEffect
             let rate = voiceMessageViewModel.devicePCMSampleRate
             viewModel.syncDeviceAlarmAudio(pcmData, sampleRate: rate) { _ in
-                viewModel.setAlarm(time: time)
+                viewModel.setAlarm(time: time, repeatDays: days)
                 viewModel.setWakeEffect(effect)
             }
         } else {
-            viewModel.setAlarm(time: alarmTime)
+            viewModel.setAlarm(time: alarmTime, repeatDays: days)
             viewModel.setWakeEffect(selectedWakeEffect)
         }
     }
