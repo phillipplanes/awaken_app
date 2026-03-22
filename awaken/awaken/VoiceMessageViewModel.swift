@@ -9,6 +9,7 @@ final class VoiceMessageViewModel: ObservableObject {
     enum Status {
         case idle
         case generating
+        case recording
         case ready
         case failed(String)
 
@@ -18,6 +19,8 @@ final class VoiceMessageViewModel: ObservableObject {
                 return "No voice message generated yet."
             case .generating:
                 return "Generating message..."
+            case .recording:
+                return "Recording..."
             case .ready:
                 return "Voice message ready."
             case .failed(let message):
@@ -30,9 +33,14 @@ final class VoiceMessageViewModel: ObservableObject {
     @Published private(set) var scriptText = ""
     @Published private(set) var devicePCMData: Data?
     @Published private(set) var devicePCMSampleRate: Int = 24000
+    @Published private(set) var isRecording = false
+    @Published private(set) var recordingTimeRemaining: Int = 0
 
-    private var audioURL: URL?
+    private(set) var audioURL: URL?
     private var audioPlayer: AVAudioPlayer?
+    private var audioRecorder: AVAudioRecorder?
+    private var recordingTimer: Timer?
+    private static let maxRecordingSeconds = 15
 
     func generate(alarmType: AlarmType, alarmTime: Date, weatherSummary: String, voice: String) async {
         status = .generating
@@ -61,10 +69,17 @@ final class VoiceMessageViewModel: ObservableObject {
             }
 
             let deviceUploadPCMData: Data
+            let deviceUploadRate: Int
             do {
+                // Preview WAV uses original 24kHz (phone speaker handles any rate)
                 let previewWav = makeWAVFileData(from: pcm24kData, sampleRate: 24000)
                 audioURL = try writeAudioFile(data: previewWav, fileExtension: "wav")
-                deviceUploadPCMData = pcm24kData
+                // Resample to 44100Hz — the native A2DP/I2S rate on the device.
+                // This avoids I2S reconfiguration and is proven to work with MAX98357A.
+                let resampled = resamplePCM(from: pcm24kData, inputRate: 24000, outputRate: 44100)
+                deviceUploadPCMData = resampled
+                deviceUploadRate = 44100
+                logger.info("Resampled \(pcm24kData.count) bytes @ 24kHz → \(resampled.count) bytes @ 44100Hz for device")
                 // Save a ≤30s version as the notification sound for lock-screen alarms
                 let notifWav = makeNotificationSoundWAV(from: pcm24kData, sampleRate: 24000, maxSeconds: 30)
                 AlarmNotificationManager.shared.saveCustomAlarmSound(wavData: notifWav)
@@ -74,7 +89,7 @@ final class VoiceMessageViewModel: ObservableObject {
 
             scriptText = script
             devicePCMData = deviceUploadPCMData
-            devicePCMSampleRate = 24000
+            devicePCMSampleRate = deviceUploadRate
             status = .ready
         } catch {
             logger.error("Voice generation failed: \(error.localizedDescription, privacy: .public)")
@@ -114,6 +129,106 @@ final class VoiceMessageViewModel: ObservableObject {
 
     func stopAlarmAudio() {
         audioPlayer?.stop()
+    }
+
+    // MARK: - Microphone Recording
+
+    func startRecording() {
+        stopAlarmAudio()
+        audioPlayer = nil
+
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playAndRecord, options: [.defaultToSpeaker])
+            try session.setActive(true)
+        } catch {
+            status = .failed("Microphone access failed: \(error.localizedDescription)")
+            return
+        }
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("awaken-recording-\(UUID().uuidString).wav")
+
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: 44100,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false
+        ]
+
+        do {
+            let recorder = try AVAudioRecorder(url: tempURL, settings: settings)
+            recorder.prepareToRecord()
+            recorder.record(forDuration: TimeInterval(Self.maxRecordingSeconds))
+            audioRecorder = recorder
+            isRecording = true
+            status = .recording
+            scriptText = ""
+            recordingTimeRemaining = Self.maxRecordingSeconds
+
+            recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self, self.isRecording else {
+                        self?.recordingTimer?.invalidate()
+                        self?.recordingTimer = nil
+                        return
+                    }
+                    self.recordingTimeRemaining -= 1
+                    if self.recordingTimeRemaining <= 0 {
+                        self.stopRecording()
+                    }
+                }
+            }
+        } catch {
+            status = .failed("Could not start recording: \(error.localizedDescription)")
+        }
+    }
+
+    func stopRecording() {
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+        guard let recorder = audioRecorder, isRecording else { return }
+        recorder.stop()
+        isRecording = false
+        let recordedURL = recorder.url
+        audioRecorder = nil
+
+        // Restore audio session for playback
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, options: [.allowBluetoothA2DP, .mixWithOthers])
+        try? session.setActive(true)
+
+        processRecordedFile(url: recordedURL)
+    }
+
+    private func processRecordedFile(url: URL) {
+        do {
+            let wavData = try Data(contentsOf: url)
+            // WAV header is 44 bytes; extract raw PCM after it
+            guard wavData.count > 44 else {
+                status = .failed("Recording too short.")
+                return
+            }
+            let pcmData = wavData.subdata(in: 44..<wavData.count)
+            logger.info("Recorded PCM: \(pcmData.count) bytes @ 44100Hz")
+
+            // Preview file is the recorded WAV itself
+            audioURL = url
+            // Device upload: already at 44100Hz mono 16-bit — no resampling needed
+            devicePCMData = pcmData
+            devicePCMSampleRate = 44100
+            scriptText = "Recorded \(String(format: "%.1f", Double(pcmData.count) / (2.0 * 44100.0)))s voice message"
+
+            // Save notification sound (trimmed to 30s)
+            let notifWav = makeNotificationSoundWAV(from: pcmData, sampleRate: 44100, maxSeconds: 30)
+            AlarmNotificationManager.shared.saveCustomAlarmSound(wavData: notifWav)
+
+            status = .ready
+        } catch {
+            status = .failed("Failed to process recording: \(error.localizedDescription)")
+        }
     }
 
     private func playAudioFile(url: URL, loops: Bool) {
@@ -216,6 +331,48 @@ final class VoiceMessageViewModel: ObservableObject {
         }
 
         return makeWAVFileData(from: pcm, sampleRate: sampleRate)
+    }
+
+    /// Resample 16-bit mono PCM to a different sample rate.
+    /// Uses integer duplication when outputRate is an exact multiple of inputRate,
+    /// otherwise falls back to linear interpolation.
+    private func resamplePCM(from data: Data, inputRate: Int, outputRate: Int) -> Data {
+        guard inputRate != outputRate else { return data }
+        let inputCount = data.count / 2
+
+        // Exact integer multiple — duplicate each sample N times (zero-computation path)
+        if outputRate % inputRate == 0 {
+            let factor = outputRate / inputRate
+            var output = Data(capacity: inputCount * factor * 2)
+            data.withUnsafeBytes { raw in
+                let samples = raw.bindMemory(to: Int16.self)
+                for i in 0..<samples.count {
+                    var s = samples[i]
+                    for _ in 0..<factor {
+                        withUnsafeBytes(of: &s) { output.append(contentsOf: $0) }
+                    }
+                }
+            }
+            return output
+        }
+
+        // General case — linear interpolation
+        let ratio = Double(inputRate) / Double(outputRate)
+        let outputCount = Int(Double(inputCount) / ratio)
+        var output = Data(capacity: outputCount * 2)
+        data.withUnsafeBytes { raw in
+            let samples = raw.bindMemory(to: Int16.self)
+            for i in 0..<outputCount {
+                let srcPos = Double(i) * ratio
+                let idx = Int(srcPos)
+                let frac = srcPos - Double(idx)
+                let s0 = samples[min(idx, samples.count - 1)]
+                let s1 = samples[min(idx + 1, samples.count - 1)]
+                var sample = Int16(Double(s0) + frac * (Double(s1) - Double(s0)))
+                withUnsafeBytes(of: &sample) { output.append(contentsOf: $0) }
+            }
+        }
+        return output
     }
 
     private func makeNotificationSoundWAV(from pcmData: Data, sampleRate: Int, maxSeconds: Int) -> Data {

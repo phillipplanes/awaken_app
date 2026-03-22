@@ -16,12 +16,18 @@ struct OpenAIService {
         formatter.dateFormat = "h:mm a"
         let alarmTimeText = formatter.string(from: alarmTime)
 
-        let systemPrompt = """
-        You write short alarm wake-up scripts.
-        Keep it to 1-2 sentences, 12-28 words total.
-        Be inspirational, practical, and positive.
-        No hashtags, no emojis, no quotes, no lists.
-        """
+        let userProfile = UserProfile.load()
+        var systemLines = [
+            "You write short alarm wake-up scripts.",
+            "Keep it to 1-2 sentences, 12-28 words total.",
+            "Be inspirational, practical, and positive.",
+            "No hashtags, no emojis, no quotes, no lists."
+        ]
+        if !userProfile.promptContext.isEmpty {
+            systemLines.append("Personal context: \(userProfile.promptContext)")
+            systemLines.append("Use their name occasionally. Subtly reference their motivations or stressors when it fits naturally.")
+        }
+        let systemPrompt = systemLines.joined(separator: "\n")
 
         let userPrompt = """
         Alarm type: \(alarmType.title)

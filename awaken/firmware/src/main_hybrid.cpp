@@ -14,7 +14,10 @@
 #include <driver/i2s.h>
 #include <esp_gap_bt_api.h>
 #include <esp_gap_ble_api.h>
+#include <esp_bt_main.h>
+#include <esp_bt.h>
 #include <esp_system.h>
+#include <esp_pm.h>
 #include <math.h>
 
 // --- BLE UUIDs (match app contract) ---
@@ -91,8 +94,17 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", -18000);
 
 class HybridA2DPSink : public BluetoothA2DPSinkQueued {
 public:
-    void setOutputActive(bool active) {
-        set_i2s_active(active);
+    volatile bool outputForceMuted = false;
+
+    void muteOutput() { outputForceMuted = true; }
+    void unmuteOutput() { outputForceMuted = false; }
+
+    // Skip ring buffer writes when muted — prevents out->begin() and
+    // I2S driver reinstall from write_audio's !is_i2s_active path.
+    // Let set_i2s_active work normally so the library state machine stays consistent.
+    size_t write_audio(const uint8_t *data, size_t size) override {
+        if (outputForceMuted) return size; // discard silently
+        return BluetoothA2DPSinkQueued::write_audio(data, size);
     }
 };
 
@@ -136,6 +148,10 @@ File uploadedVoiceHandle;
 File playbackFileHandle;
 bool playbackLoopEnabled = false;
 bool playbackActive = false;
+uint32_t playbackInputRate = 44100;  // sample rate of the file being played
+// Gap between alarm audio loops (escalating urgency)
+bool playbackInGap = false;
+unsigned long playbackGapStartMs = 0;
 volatile bool localAudioOwnsI2S = false;
 bool a2dpConnected = false;
 esp_a2d_audio_state_t a2dpAudioState = ESP_A2D_AUDIO_STATE_REMOTE_SUSPEND;
@@ -152,6 +168,31 @@ unsigned long customHapticStartMs = 0;
 unsigned long customHapticLastUpdateMs = 0;
 bool namesInitialized = false;
 
+// Forward declarations for A2DP capture
+void serviceA2dpCaptureDrain();
+void startA2dpCapture();
+void stopA2dpCapture();
+
+// --- A2DP audio capture state ---
+#define VOICE_UPLOAD_CMD_A2DP_START  0x10
+#define VOICE_UPLOAD_CMD_A2DP_STOP   0x11
+
+static constexpr size_t A2DP_CAPTURE_BUF_SIZE = 16384;  // 16KB ring buffer (20ms loop drain keeps up)
+static uint8_t a2dpCaptureBuf[A2DP_CAPTURE_BUF_SIZE];
+static volatile size_t a2dpCaptureWritePos = 0;
+static volatile size_t a2dpCaptureReadPos = 0;
+static volatile bool a2dpCaptureActive = false;
+static volatile bool a2dpCaptureGotAudio = false; // true once non-silence is detected
+static File a2dpCaptureFile;
+static uint32_t a2dpCaptureBytesWritten = 0;
+static unsigned long a2dpCaptureStartMs = 0;
+static constexpr unsigned long A2DP_CAPTURE_TIMEOUT_MS = 30000; // 30s max
+static constexpr uint32_t A2DP_CAPTURE_SAMPLE_RATE = 44100;
+static constexpr int16_t A2DP_SILENCE_THRESHOLD = 50; // samples below this are silence
+static volatile uint32_t a2dpCaptureDroppedSamples = 0;
+static volatile bool a2dpCaptureStartRequested = false;
+static volatile bool a2dpCaptureStopRequested = false;
+
 bool isCustomHapticEffect(uint8_t effectId);
 void ensureDrvMode(uint8_t mode);
 void stopHaptics();
@@ -165,6 +206,39 @@ void initBatteryMonitor();
 void serviceBatteryMonitor();
 uint8_t readBatteryLevelPercent();
 void updateBatteryLevelCharacteristic(bool notifySubscribers);
+
+// --- Power management ---
+static bool cpuIsHighSpeed = true;
+
+void setCpuHigh() {
+    if (!cpuIsHighSpeed) {
+        setCpuFrequencyMhz(240);
+        cpuIsHighSpeed = true;
+        Serial.println("[Power] CPU -> 240MHz");
+    }
+}
+
+void setCpuLow() {
+    if (cpuIsHighSpeed) {
+        setCpuFrequencyMhz(80);
+        cpuIsHighSpeed = false;
+        Serial.println("[Power] CPU -> 80MHz");
+    }
+}
+
+bool needsHighCpu() {
+    return alarmFiring || playbackActive || customHapticActive
+        || a2dpCaptureActive || voiceUploadActive
+        || a2dpConnected;
+}
+
+void servicePowerManagement() {
+    if (needsHighCpu()) {
+        setCpuHigh();
+    } else {
+        setCpuLow();
+    }
+}
 
 bool isCustomHapticEffect(uint8_t effectId) {
     return effectId == CUSTOM_EFFECT_SINE_RAMP;
@@ -259,7 +333,7 @@ void serviceAlarmHaptics() {
     if (customHapticActive) stopCustomHapticPattern();
 
     unsigned long now = millis();
-    if (now - lastAlarmHapticPulseMs > 2500) {
+    if (now - lastAlarmHapticPulseMs > 800) {
         playStandardHapticEffect(wakeEffectId);
         lastAlarmHapticPulseMs = now;
     }
@@ -331,41 +405,23 @@ void serviceBatteryMonitor() {
 
 void acquireI2SForLocalPlayback(uint32_t sampleRate) {
     localAudioOwnsI2S = true;
-    // Stop I2S, flush stale A2DP data, reconfigure clock, restart for local use
+    // Block A2DP's write_audio so it can't push to ring buffer or reinstall I2S
+    a2dpSink.muteOutput();
+    // Flush stale DMA data and restart I2S for our exclusive use
     i2s_stop(I2S_PORT);
     delay(10);
     i2s_zero_dma_buffer(I2S_PORT);
-    esp_err_t err = i2s_set_clk(
-        I2S_PORT,
-        sampleRate,
-        I2S_BITS_PER_SAMPLE_16BIT,
-        I2S_CHANNEL_STEREO
-    );
-    if (err != ESP_OK) {
-        Serial.print("i2s_set_clk(local) failed err=");
-        Serial.println((int)err);
-    }
     i2s_start(I2S_PORT);
-    Serial.print("I2S acquired for local playback at ");
+    Serial.print("I2S acquired for local playback (file rate=");
     Serial.print(sampleRate);
-    Serial.println("Hz");
+    Serial.println("Hz, I2S stays at 44100Hz, A2DP muted)");
 }
 
 void releaseI2SToA2DP() {
-    i2s_stop(I2S_PORT);
-    i2s_zero_dma_buffer(I2S_PORT);
-    esp_err_t err = i2s_set_clk(
-        I2S_PORT,
-        44100,
-        I2S_BITS_PER_SAMPLE_16BIT,
-        I2S_CHANNEL_STEREO
-    );
-    if (err != ESP_OK) {
-        Serial.print("i2s_set_clk(a2dp) failed err=");
-        Serial.println((int)err);
-    }
-    i2s_start(I2S_PORT);
     localAudioOwnsI2S = false;
+    // Re-enable A2DP's write_audio path
+    a2dpSink.unmuteOutput();
+    Serial.println("I2S released back to A2DP");
 }
 
 void initDeviceNames() {
@@ -384,9 +440,18 @@ void onA2dpConnectionStateChanged(esp_a2d_connection_state_t state, void *) {
 }
 
 void onA2dpAudioStateChanged(esp_a2d_audio_state_t state, void *) {
+    esp_a2d_audio_state_t prevState = a2dpAudioState;
     a2dpAudioState = state;
     Serial.print("A2DP audio state: ");
     Serial.println(a2dpSink.to_str(state));
+
+    // Auto-stop capture when audio stops playing (phone finished playback)
+    if (a2dpCaptureActive &&
+        prevState == ESP_A2D_AUDIO_STATE_STARTED &&
+        state == ESP_A2D_AUDIO_STATE_REMOTE_SUSPEND) {
+        Serial.println("[A2DP Capture] Audio stopped -- auto-stopping capture");
+        stopA2dpCapture();
+    }
 }
 
 void notifyAlarmState(uint8_t state) {
@@ -465,6 +530,7 @@ void stopFilePlayback() {
     }
     playbackActive = false;
     playbackLoopEnabled = false;
+    playbackInGap = false;
     if (localAudioOwnsI2S) {
         releaseI2SToA2DP();
     }
@@ -487,8 +553,7 @@ bool startFilePlayback(const char* filePath, bool loopPlayback, uint32_t sampleR
     Serial.print("  file: "); Serial.println(filePath);
     Serial.print("  fileSize: "); Serial.print(fileSize); Serial.println(" bytes");
     Serial.print("  sampleRate: "); Serial.print(sampleRate); Serial.println(" Hz");
-    Serial.print("  format: 16-bit mono PCM -> stereo I2S");
-    Serial.println();
+    Serial.println("  format: 16-bit mono PCM -> stereo I2S @ 44100Hz");
     Serial.print("  duration: "); Serial.print(durationSec, 1); Serial.println(" sec");
     Serial.print("  loop: "); Serial.println(loopPlayback ? "yes" : "no");
 
@@ -507,38 +572,69 @@ bool startFilePlayback(const char* filePath, bool loopPlayback, uint32_t sampleR
     }
     Serial.println("======================");
 
+    playbackInputRate = sampleRate;
     playbackLoopEnabled = loopPlayback;
     playbackActive = true;
     return true;
 }
 
+// Returns the gap duration (ms) between alarm audio loops based on how long
+// the alarm has been firing.  Escalates urgency over time:
+//   0–60s  → 15s gap,  60–120s → 10s gap,  120s+ → 5s gap
+unsigned long alarmLoopGapMs() {
+    if (alarmTriggeredAtMs == 0) return 15000;
+    unsigned long elapsed = millis() - alarmTriggeredAtMs;
+    if (elapsed < 60000)  return 15000;
+    if (elapsed < 120000) return 10000;
+    return 5000;
+}
+
 void serviceFilePlayback() {
     if (!playbackActive || !playbackFileHandle) return;
 
-    int16_t monoBuf[256];
-    int16_t stereoBuf[512];
+    // If we're in a gap between loops, wait it out
+    if (playbackInGap) {
+        if (millis() - playbackGapStartMs < alarmLoopGapMs()) return;
+        playbackInGap = false;
+        playbackFileHandle.seek(0);
+    }
+
+    // I2S stays at 44100Hz. iOS resamples to 44100 before upload.
+    // Simple mono PCM → stereo I2S conversion.
+    // Buffer 200ms of audio per call to survive the main loop delay.
+    static int16_t monoBuf[256];
+    static int16_t stereoBuf[512];
     size_t bytesWritten;
     int16_t amplitude = (int16_t)((int32_t)32767 * speakerVolume / 100);
+    int totalFramesWritten = 0;
+    const int targetFrames = playbackInputRate / 5; // 200ms worth of frames
 
-    size_t bytesRead = playbackFileHandle.read((uint8_t*)monoBuf, sizeof(monoBuf));
-    if (bytesRead == 0) {
-        if (playbackLoopEnabled && alarmFiring) {
-            playbackFileHandle.seek(0);
+    while (totalFramesWritten < targetFrames) {
+        size_t bytesRead = playbackFileHandle.read((uint8_t*)monoBuf, sizeof(monoBuf));
+        if (bytesRead == 0) {
+            if (playbackLoopEnabled && alarmFiring) {
+                // Enter gap before replaying — silence the DMA buffers
+                i2s_zero_dma_buffer(I2S_PORT);
+                playbackInGap = true;
+                playbackGapStartMs = millis();
+                Serial.printf("[Alarm] Loop gap started (%lu ms)\n", alarmLoopGapMs());
+                return;
+            }
+            stopFilePlayback();
+            stopSpeakerOutput();
             return;
         }
-        stopFilePlayback();
-        stopSpeakerOutput();
-        return;
-    }
 
-    int samples = bytesRead / (int)sizeof(int16_t);
-    for (int i = 0; i < samples; i++) {
-        int16_t scaled = (int16_t)((int32_t)monoBuf[i] * amplitude / 32767);
-        stereoBuf[i * 2] = scaled;
-        stereoBuf[i * 2 + 1] = scaled;
-    }
+        int samples = bytesRead / (int)sizeof(int16_t);
+        for (int i = 0; i < samples; i++) {
+            int16_t scaled = (int16_t)((int32_t)monoBuf[i] * amplitude / 32767);
+            stereoBuf[i * 2] = scaled;
+            stereoBuf[i * 2 + 1] = scaled;
+        }
 
-    i2s_write(I2S_PORT, stereoBuf, samples * 2 * sizeof(int16_t), &bytesWritten, portMAX_DELAY);
+        i2s_write(I2S_PORT, stereoBuf, samples * 2 * sizeof(int16_t), &bytesWritten, portMAX_DELAY);
+        totalFramesWritten += samples;
+    }
 }
 
 bool parseAlarmTime(const std::string &raw, long &outHour, long &outMinute) {
@@ -721,6 +817,118 @@ void snoozeAlarm() {
     Serial.println(alarmMinute);
 }
 
+// --- A2DP capture: stream reader callback (runs in BT task — must be fast) ---
+void a2dpStreamReaderCallback(const uint8_t *data, uint32_t len) {
+    if (!a2dpCaptureActive) return;
+
+    // Input: stereo 16-bit PCM (L,R interleaved), 4 bytes per frame
+    // Output: mono 16-bit PCM, 2 bytes per frame
+    const int16_t *frames = (const int16_t *)data;
+    int frameCount = len / 4;
+
+    for (int i = 0; i < frameCount; i++) {
+        int16_t left = frames[i * 2];
+        int16_t right = frames[i * 2 + 1];
+        int16_t mono = (int16_t)(((int32_t)left + (int32_t)right) / 2);
+
+        // Skip leading silence (A2DP settling period)
+        if (!a2dpCaptureGotAudio) {
+            if (mono > -A2DP_SILENCE_THRESHOLD && mono < A2DP_SILENCE_THRESHOLD) continue;
+            a2dpCaptureGotAudio = true;
+        }
+
+        size_t wp = a2dpCaptureWritePos;
+        size_t nextWp = (wp + 2) % A2DP_CAPTURE_BUF_SIZE;
+        if (nextWp == a2dpCaptureReadPos) { a2dpCaptureDroppedSamples++; continue; }
+
+        a2dpCaptureBuf[wp]     = (uint8_t)(mono & 0xFF);
+        a2dpCaptureBuf[wp + 1] = (uint8_t)((mono >> 8) & 0xFF);
+        a2dpCaptureWritePos = nextWp;
+    }
+}
+
+// Drain ring buffer to SPIFFS (called from loop)
+void serviceA2dpCaptureDrain() {
+    if (!a2dpCaptureFile) return;
+
+    size_t rp = a2dpCaptureReadPos;
+    size_t wp = a2dpCaptureWritePos;
+    if (rp == wp) return;
+
+    size_t available;
+    if (wp > rp) {
+        available = wp - rp;
+    } else {
+        available = A2DP_CAPTURE_BUF_SIZE - rp;
+    }
+
+    size_t written = a2dpCaptureFile.write(a2dpCaptureBuf + rp, available);
+    a2dpCaptureBytesWritten += written;
+    a2dpCaptureReadPos = (rp + written) % A2DP_CAPTURE_BUF_SIZE;
+}
+
+void startA2dpCapture() {
+    if (a2dpCaptureActive) return;
+
+    // Mute A2DP output FIRST — prevents write_audio race during transition.
+    // Must happen before stopFilePlayback, which would otherwise unmute briefly.
+    a2dpSink.muteOutput();
+
+    // Stop file playback WITHOUT calling releaseI2SToA2DP (which would unmute).
+    if (playbackFileHandle) playbackFileHandle.close();
+    playbackActive = false;
+    playbackLoopEnabled = false;
+    playbackInGap = false;
+    localAudioOwnsI2S = false;
+
+    Serial.printf("[A2DP Capture] Free heap: %u, min ever: %u\n",
+                  ESP.getFreeHeap(), ESP.getMinFreeHeap());
+
+    if (a2dpCaptureFile) a2dpCaptureFile.close();
+    a2dpCaptureFile = SPIFFS.open(uploadedVoiceFile, "w");
+    if (!a2dpCaptureFile) {
+        Serial.println("[A2DP Capture] SPIFFS open failed");
+        a2dpSink.unmuteOutput();
+        return;
+    }
+
+    a2dpCaptureWritePos = 0;
+    a2dpCaptureReadPos = 0;
+    a2dpCaptureBytesWritten = 0;
+    a2dpCaptureGotAudio = false;
+    a2dpCaptureDroppedSamples = 0;
+    a2dpCaptureStartMs = millis();
+    a2dpCaptureActive = true;
+
+    uploadedVoiceReady = false;
+    uploadedVoiceSampleRate = A2DP_CAPTURE_SAMPLE_RATE;
+
+    Serial.println("[A2DP Capture] Started (speaker muted)");
+}
+
+void stopA2dpCapture() {
+    if (!a2dpCaptureActive) return;
+    a2dpCaptureActive = false;
+    a2dpSink.unmuteOutput(); // unmute speaker
+
+    // Drain remaining data
+    serviceA2dpCaptureDrain();
+    if (a2dpCaptureFile) {
+        a2dpCaptureFile.flush();
+        a2dpCaptureFile.close();
+    }
+
+    uploadedVoiceReady = a2dpCaptureBytesWritten > 0;
+    uploadedVoiceReceivedBytes = a2dpCaptureBytesWritten;
+
+    float durationSec = (float)a2dpCaptureBytesWritten / (2.0f * A2DP_CAPTURE_SAMPLE_RATE);
+    Serial.println("=== A2DP CAPTURE COMPLETE ===");
+    Serial.printf("  bytes: %u\n", a2dpCaptureBytesWritten);
+    Serial.printf("  duration: %.1f sec\n", durationSec);
+    Serial.printf("  dropped samples: %u\n", a2dpCaptureDroppedSamples);
+    Serial.println("=============================");
+}
+
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer *) override {
         Serial.println("BLE client connected");
@@ -734,7 +942,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
         connParams.latency = 0;
         connParams.min_int = 0x18; // 30 ms
         connParams.max_int = 0x30; // 60 ms
-        connParams.timeout = 400;  // 4 s supervision timeout
+        connParams.timeout = 200;  // 2 s supervision timeout — faster stale connection detection
         esp_err_t err = esp_ble_gap_update_conn_params(&connParams);
         if (err != ESP_OK) {
             Serial.print("BLE conn param update failed: ");
@@ -931,6 +1139,17 @@ class SpeakerControlCallback: public BLECharacteristicCallbacks {
     }
 };
 
+// RAM buffer to absorb BLE writes quickly — flush to SPIFFS when full
+static uint8_t voiceUploadBuf[4096];
+static size_t  voiceUploadBufLen = 0;
+
+static void flushVoiceUploadBuf() {
+    if (voiceUploadBufLen > 0 && uploadedVoiceHandle) {
+        uploadedVoiceHandle.write(voiceUploadBuf, voiceUploadBufLen);
+        voiceUploadBufLen = 0;
+    }
+}
+
 class VoiceUploadCallback: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pChar) override {
         std::string value = pChar->getValue();
@@ -938,13 +1157,27 @@ class VoiceUploadCallback: public BLECharacteristicCallbacks {
 
         uint8_t cmd = (uint8_t)value[0];
 
+        if (cmd == VOICE_UPLOAD_CMD_A2DP_START) {
+            Serial.println("[VoiceUpload] A2DP capture start requested (deferred)");
+            a2dpCaptureStartRequested = true;
+            return;
+        }
+
+        if (cmd == VOICE_UPLOAD_CMD_A2DP_STOP) {
+            Serial.println("[VoiceUpload] A2DP capture stop requested (deferred)");
+            a2dpCaptureStopRequested = true;
+            return;
+        }
+
         if (cmd == VOICE_UPLOAD_CMD_BEGIN) {
+            Serial.printf("[VoiceUpload] BEGIN len=%u\n", value.length());
             if (uploadedVoiceHandle) uploadedVoiceHandle.close();
             stopFilePlayback();
             uploadedVoiceExpectedBytes = 0;
             uploadedVoiceReceivedBytes = 0;
             uploadedVoiceReady = false;
             voiceUploadActive = false;
+            voiceUploadBufLen = 0;
 
             if (value.length() >= 5) {
                 uploadedVoiceExpectedBytes =
@@ -964,10 +1197,11 @@ class VoiceUploadCallback: public BLECharacteristicCallbacks {
 
             uploadedVoiceHandle = SPIFFS.open(uploadedVoiceFile, "w");
             if (!uploadedVoiceHandle) {
-                Serial.println("Voice upload start failed: could not open file");
+                Serial.println("[VoiceUpload] SPIFFS open failed");
                 return;
             }
-
+            Serial.printf("[VoiceUpload] expecting %u bytes @ %u Hz\n",
+                          uploadedVoiceExpectedBytes, uploadedVoiceSampleRate);
             voiceUploadActive = true;
             return;
         }
@@ -976,12 +1210,27 @@ class VoiceUploadCallback: public BLECharacteristicCallbacks {
             if (!voiceUploadActive || !uploadedVoiceHandle) return;
             if (value.length() <= 1) return;
 
-            size_t wrote = uploadedVoiceHandle.write((const uint8_t*)&value[1], value.length() - 1);
-            uploadedVoiceReceivedBytes += wrote;
+            size_t dataLen = value.length() - 1;
+            const uint8_t *data = (const uint8_t*)&value[1];
+
+            // Buffer in RAM — only flush to SPIFFS when buffer is full
+            if (voiceUploadBufLen + dataLen > sizeof(voiceUploadBuf)) {
+                flushVoiceUploadBuf();
+            }
+            memcpy(voiceUploadBuf + voiceUploadBufLen, data, dataLen);
+            voiceUploadBufLen += dataLen;
+            uploadedVoiceReceivedBytes += dataLen;
+
+            if (uploadedVoiceReceivedBytes % 50000 < 100) {
+                Serial.printf("[VoiceUpload] %u / %u bytes\n",
+                              uploadedVoiceReceivedBytes, uploadedVoiceExpectedBytes);
+            }
             return;
         }
 
         if (cmd == VOICE_UPLOAD_CMD_END) {
+            Serial.printf("[VoiceUpload] END received, %u bytes buffered\n", uploadedVoiceReceivedBytes);
+            flushVoiceUploadBuf();
             if (uploadedVoiceHandle) uploadedVoiceHandle.close();
             voiceUploadActive = false;
             uploadedVoiceReady = uploadedVoiceReceivedBytes > 0;
@@ -1048,10 +1297,18 @@ class TimeSyncCallback: public BLECharacteristicCallbacks {
 
 void setupBle() {
     BLEDevice::init(bleName);
+    BLEDevice::setMTU(517);  // Allow large BLE writes (voice upload packets up to 512 bytes)
     BLEServer *server = BLEDevice::createServer();
     server->setCallbacks(new MyServerCallbacks());
 
-    BLEService *service = server->createService(BLEUUID(SERVICE_UUID), 40);
+    BLEService *service = server->createService(BLEUUID(SERVICE_UUID), 60);
+
+    // Voice upload registered FIRST to ensure it gets handles before the limit
+    BLECharacteristic *voiceUploadChar = service->createCharacteristic(
+        VOICE_UPLOAD_CHAR_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+    voiceUploadChar->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE);
+    voiceUploadChar->setCallbacks(new VoiceUploadCallback());
+    Serial.printf("VoiceUpload char registered: handle=%u\n", voiceUploadChar->getHandle());
 
     BLECharacteristic *alarmChar = service->createCharacteristic(
         ALARM_CHARACTERISTIC_UUID,
@@ -1103,10 +1360,6 @@ void setupBle() {
     BLECharacteristic *speakerControlChar = service->createCharacteristic(
         SPEAKER_CONTROL_CHAR_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
     speakerControlChar->setCallbacks(new SpeakerControlCallback());
-
-    BLECharacteristic *voiceUploadChar = service->createCharacteristic(
-        VOICE_UPLOAD_CHAR_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
-    voiceUploadChar->setCallbacks(new VoiceUploadCallback());
 
     BLECharacteristic *timeSyncChar = service->createCharacteristic(
         TIME_SYNC_CHAR_UUID,
@@ -1166,10 +1419,27 @@ void setupA2dp() {
     a2dpSink.set_i2s_port(I2S_PORT);
     a2dpSink.set_i2s_config(i2sConfig);
     a2dpSink.set_pin_config(pinConfig);
+    a2dpSink.set_raw_stream_reader(a2dpStreamReaderCallback); // capture PRE-volume audio; I2S output continues normally
     a2dpSink.set_on_connection_state_changed(onA2dpConnectionStateChanged);
     a2dpSink.set_on_audio_state_changed(onA2dpAudioStateChanged);
     a2dpSink.set_reconnect_delay(1500);
-    a2dpSink.start(a2dpName, true); // reconnect to the last paired phone when possible
+
+    // Clear stale bonding keys — prevents "Pairing Unsuccessful" after
+    // the phone forgets the device. Fresh pairing on each boot.
+    int bondedCount = esp_bt_gap_get_bond_device_num();
+    if (bondedCount > 0) {
+        esp_bd_addr_t *bondedDevices = (esp_bd_addr_t *)malloc(bondedCount * sizeof(esp_bd_addr_t));
+        if (bondedDevices) {
+            esp_bt_gap_get_bond_device_list(&bondedCount, bondedDevices);
+            for (int i = 0; i < bondedCount; i++) {
+                esp_bt_gap_remove_bond_device(bondedDevices[i]);
+            }
+            free(bondedDevices);
+            Serial.printf("[BT] Cleared %d stale bond(s)\n", bondedCount);
+        }
+    }
+
+    a2dpSink.start(a2dpName, true);
     a2dpSink.set_connectable(true);
     a2dpSink.set_discoverability(ESP_BT_GENERAL_DISCOVERABLE);
 
@@ -1228,6 +1498,11 @@ void setup() {
     setupA2dp();
     setupBle();
     ensureClassicNameAndDiscoverable();
+
+    // Start at low CPU since nothing is active yet
+    setCpuFrequencyMhz(80);
+    cpuIsHighSpeed = false;
+    Serial.println("[Power] CPU -> 80MHz (idle start)");
 }
 
 void loop() {
@@ -1314,6 +1589,25 @@ void loop() {
 
     serviceFilePlayback();
 
+    // Handle deferred A2DP capture start/stop (from BLE callbacks)
+    if (a2dpCaptureStartRequested) {
+        a2dpCaptureStartRequested = false;
+        startA2dpCapture();
+    }
+    if (a2dpCaptureStopRequested) {
+        a2dpCaptureStopRequested = false;
+        stopA2dpCapture();
+    }
+
+    // Drain A2DP capture buffer to SPIFFS
+    if (a2dpCaptureActive) {
+        serviceA2dpCaptureDrain();
+        if (millis() - a2dpCaptureStartMs > A2DP_CAPTURE_TIMEOUT_MS) {
+            Serial.println("[A2DP Capture] Timeout -- auto-stopping");
+            stopA2dpCapture();
+        }
+    }
+
     if (!a2dpConnected) {
         unsigned long now = millis();
         if (now - lastA2dpConnectableRefreshMs > 5000) {
@@ -1323,5 +1617,14 @@ void loop() {
         }
     }
 
-    delay(customHapticActive ? 20 : 100);
+    servicePowerManagement();
+
+    // Adaptive delay: fast when actively playing/capturing, slow when fully idle.
+    if (playbackActive || customHapticActive || a2dpCaptureActive) {
+        delay(20);
+    } else if (alarmIsSet || alarmFiring || voiceUploadActive || a2dpConnected) {
+        delay(100);
+    } else {
+        delay(500);
+    }
 }

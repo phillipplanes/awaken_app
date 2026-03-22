@@ -72,24 +72,28 @@ struct ContentView: View {
     @State private var voiceOption: VoiceOption = .shimmer
     @State private var selectedWakeEffect: UInt8 = 1
     @State private var alarmAudioOutput: AlarmAudioOutput = .phone
+    @State private var repeatDays: Set<Int> = [] // 1=Sun, 2=Mon, ..., 7=Sat
     @State private var intensityDebounce: DispatchWorkItem?
     @State private var speakerDebounce: DispatchWorkItem?
     @State private var showTestSection = false
+    @State private var showSettings = false
+    @EnvironmentObject private var theme: AppTheme
+    @EnvironmentObject private var appState: AppState
 
-    private let accent = Color(red: 0.35, green: 0.60, blue: 0.54)
-    private let accentDeep = Color(red: 0.24, green: 0.46, blue: 0.41)
-    private let accentSoft = Color(red: 0.84, green: 0.90, blue: 0.87)
-    private let warmBase = Color(red: 0.96, green: 0.95, blue: 0.93)
-    private let warmBaseDeep = Color(red: 0.91, green: 0.89, blue: 0.86)
-    private let warmPaper = Color(red: 0.985, green: 0.98, blue: 0.965)
-    private let cardStroke = Color(red: 0.86, green: 0.84, blue: 0.80)
-    private let warmHighlight = Color(red: 0.94, green: 0.84, blue: 0.67)
-    private let controlFill = Color(red: 0.93, green: 0.92, blue: 0.89)
-    private let textPrimary = Color(red: 0.26, green: 0.31, blue: 0.29)
-    private let textSecondary = Color(red: 0.45, green: 0.50, blue: 0.47)
-    private let successTint = Color(red: 0.43, green: 0.63, blue: 0.54)
-    private let cautionTint = Color(red: 0.79, green: 0.57, blue: 0.40)
-    private let dangerTint = Color(red: 0.69, green: 0.41, blue: 0.40)
+    private var accent: Color { theme.accent }
+    private var accentDeep: Color { theme.accentDeep }
+    private var accentSoft: Color { theme.accentSoft }
+    private var warmBase: Color { theme.warmBase }
+    private var warmBaseDeep: Color { theme.warmBaseDeep }
+    private var warmPaper: Color { theme.warmPaper }
+    private var cardStroke: Color { theme.cardStroke }
+    private var warmHighlight: Color { theme.warmHighlight }
+    private var controlFill: Color { theme.controlFill }
+    private var textPrimary: Color { theme.textPrimary }
+    private var textSecondary: Color { theme.textSecondary }
+    private var successTint: Color { theme.successTint }
+    private var cautionTint: Color { theme.cautionTint }
+    private var dangerTint: Color { theme.dangerTint }
 
     var isConnected: Bool {
         let status = viewModel.connectionStatus
@@ -217,6 +221,14 @@ struct ContentView: View {
             .toolbarBackground(.hidden, for: .navigationBar)
             .navigationTitle("Awaken")
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        withAnimation { theme.toggle() }
+                    } label: {
+                        Image(systemName: theme.isDark ? "sun.max.fill" : "moon.fill")
+                            .foregroundColor(theme.isDark ? theme.warmHighlight : accentDeep)
+                    }
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button { viewModel.startScanning() } label: {
                         Image(systemName: "arrow.clockwise")
@@ -282,6 +294,7 @@ struct ContentView: View {
                             .scaleEffect(x: 1.6, y: 1.6)
                             .frame(maxWidth: .infinity)
                             .frame(height: 300)
+                            .colorScheme(theme.isDark ? .dark : .light)
                             .background(warmPaper)
                             .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                             .overlay(
@@ -289,6 +302,24 @@ struct ContentView: View {
                                     .stroke(cardStroke.opacity(0.9), lineWidth: 1)
                             )
                             .environment(\.colorScheme, .light)
+
+                        // Repeat days
+                        HStack(spacing: 6) {
+                            repeatDayButton(day: 2, label: "M")
+                            repeatDayButton(day: 3, label: "T")
+                            repeatDayButton(day: 4, label: "W")
+                            repeatDayButton(day: 5, label: "T")
+                            repeatDayButton(day: 6, label: "F")
+                            repeatDayButton(day: 7, label: "S")
+                            repeatDayButton(day: 1, label: "S")
+                        }
+                        .frame(maxWidth: .infinity)
+
+                        if !repeatDays.isEmpty {
+                            Text(repeatDaysSummary)
+                                .font(.caption)
+                                .foregroundColor(textSecondary)
+                        }
 
                         Divider()
 
@@ -412,16 +443,9 @@ struct ContentView: View {
                                         weatherSummary: weatherSummary,
                                         voice: voiceOption.rawValue
                                     )
-                                    if alarmAudioOutput == .deviceSpeaker,
-                                       let pcmData = voiceMessageViewModel.devicePCMData {
-                                        viewModel.syncDeviceAlarmAudio(
-                                            pcmData,
-                                            sampleRate: voiceMessageViewModel.devicePCMSampleRate
-                                        ) { _ in }
-                                    }
                                 }
                             } label: {
-                                Label("Generate", systemImage: "wand.and.stars")
+                                Label("AI Generate", systemImage: "wand.and.stars")
                                     .font(.subheadline.weight(.semibold))
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 10)
@@ -429,6 +453,32 @@ struct ContentView: View {
                                     .cornerRadius(10)
                             }
                             .foregroundColor(textPrimary)
+
+                            if voiceMessageViewModel.isRecording {
+                                Button {
+                                    voiceMessageViewModel.stopRecording()
+                                } label: {
+                                    Label("Stop (\(voiceMessageViewModel.recordingTimeRemaining)s)", systemImage: "stop.circle.fill")
+                                        .font(.subheadline.weight(.semibold))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 10)
+                                        .background(Color.red.opacity(0.2))
+                                        .cornerRadius(10)
+                                }
+                                .foregroundColor(.red)
+                            } else {
+                                Button {
+                                    voiceMessageViewModel.startRecording()
+                                } label: {
+                                    Label("Record", systemImage: "mic.circle.fill")
+                                        .font(.subheadline.weight(.semibold))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 10)
+                                        .background(controlFill)
+                                        .cornerRadius(10)
+                                }
+                                .foregroundColor(textPrimary)
+                            }
 
                             Button {
                                 voiceMessageViewModel.playPreview()
@@ -444,25 +494,31 @@ struct ContentView: View {
                         }
 
                         if alarmAudioOutput == .deviceSpeaker {
-                            Button {
-                                guard let pcmData = voiceMessageViewModel.devicePCMData else { return }
-                                viewModel.syncDeviceAlarmAudio(
-                                    pcmData,
-                                    sampleRate: voiceMessageViewModel.devicePCMSampleRate
-                                ) { success in
-                                    if success {
-                                        viewModel.playUploadedVoicePreview()
-                                    }
+                            HStack(spacing: 10) {
+                                Button {
+                                    handleSyncToDevice()
+                                } label: {
+                                    Label("Sync to Device", systemImage: "hifispeaker.fill")
+                                        .font(.subheadline.weight(.semibold))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 10)
+                                        .background(controlFill)
+                                        .cornerRadius(10)
                                 }
-                            } label: {
-                                Label("Play on Device", systemImage: "hifispeaker.fill")
-                                    .font(.subheadline.weight(.semibold))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 10)
-                                    .background(controlFill)
-                                    .cornerRadius(10)
+                                .foregroundColor(textPrimary)
+
+                                Button {
+                                    viewModel.playUploadedVoiceOnDevice()
+                                } label: {
+                                    Label("Device Play", systemImage: "play.circle.fill")
+                                        .font(.subheadline.weight(.semibold))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 10)
+                                        .background(controlFill)
+                                        .cornerRadius(10)
+                                }
+                                .foregroundColor(textPrimary)
                             }
-                            .foregroundColor(textPrimary)
                         }
 
                     }
@@ -492,20 +548,7 @@ struct ContentView: View {
 
                     // --- Set Alarm ---
                     Button {
-                        applyAlarmAudioOutput()
-                        if alarmAudioOutput == .deviceSpeaker,
-                           let pcmData = voiceMessageViewModel.devicePCMData {
-                            viewModel.syncDeviceAlarmAudio(
-                                pcmData,
-                                sampleRate: voiceMessageViewModel.devicePCMSampleRate
-                            ) { _ in
-                                viewModel.setAlarm(time: alarmTime)
-                                viewModel.setWakeEffect(selectedWakeEffect)
-                            }
-                        } else {
-                            viewModel.setAlarm(time: alarmTime)
-                            viewModel.setWakeEffect(selectedWakeEffect)
-                        }
+                        handleSetAlarm()
                     } label: {
                         HStack(spacing: 8) {
                             Image(systemName: "alarm.fill")
@@ -738,6 +781,30 @@ struct ContentView: View {
             }
             .toolbarBackground(.hidden, for: .navigationBar)
             .navigationTitle("Awaken")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button { showSettings = true } label: {
+                        Image(systemName: "gearshape.fill")
+                            .foregroundColor(textSecondary)
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        withAnimation {
+                            theme.toggle()
+                        }
+                    } label: {
+                        Image(systemName: theme.isDark ? "sun.max.fill" : "moon.fill")
+                            .foregroundColor(theme.isDark ? warmHighlight : accentDeep)
+                    }
+                }
+            }
+            .sheet(isPresented: $showSettings) {
+                SettingsView {
+                    appState.onboardingComplete = false
+                }
+                .environmentObject(theme)
+            }
             .safeAreaInset(edge: .bottom) {
                 if isAlarmAlertVisible {
                     alarmQuickActionsBar
@@ -904,6 +971,32 @@ struct ContentView: View {
             .shadow(color: accent.opacity(0.06), radius: 16, x: 0, y: 10)
     }
 
+    private func repeatDayButton(day: Int, label: String) -> some View {
+        Button {
+            if repeatDays.contains(day) {
+                repeatDays.remove(day)
+            } else {
+                repeatDays.insert(day)
+            }
+        } label: {
+            Text(label)
+                .font(.caption.weight(.bold))
+                .frame(width: 36, height: 36)
+                .background(repeatDays.contains(day) ? accent : controlFill)
+                .foregroundColor(repeatDays.contains(day) ? .white : textSecondary)
+                .clipShape(Circle())
+        }
+    }
+
+    private var repeatDaysSummary: String {
+        if repeatDays.count == 7 { return "Every day" }
+        if repeatDays == Set([2,3,4,5,6]) { return "Weekdays" }
+        if repeatDays == Set([1,7]) { return "Weekends" }
+        let dayNames = ["", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        let ordered = [2,3,4,5,6,7,1].filter { repeatDays.contains($0) }
+        return ordered.map { dayNames[$0] }.joined(separator: ", ")
+    }
+
     var weatherSummary: String {
         "\(weatherViewModel.forecastText). \(weatherViewModel.detailText)"
     }
@@ -913,6 +1006,29 @@ struct ContentView: View {
         if alarmAudioOutput == .deviceSpeaker {
             voiceMessageViewModel.stopAlarmAudio()
         }
+    }
+
+    private func handleSetAlarm() {
+        applyAlarmAudioOutput()
+        if alarmAudioOutput == .deviceSpeaker,
+           let pcmData = voiceMessageViewModel.devicePCMData, !pcmData.isEmpty {
+            let time = alarmTime
+            let effect = selectedWakeEffect
+            let rate = voiceMessageViewModel.devicePCMSampleRate
+            viewModel.syncDeviceAlarmAudio(pcmData, sampleRate: rate) { _ in
+                viewModel.setAlarm(time: time)
+                viewModel.setWakeEffect(effect)
+            }
+        } else {
+            viewModel.setAlarm(time: alarmTime)
+            viewModel.setWakeEffect(selectedWakeEffect)
+        }
+    }
+
+    private func handleSyncToDevice() {
+        guard let pcmData = voiceMessageViewModel.devicePCMData, !pcmData.isEmpty else { return }
+        let rate = voiceMessageViewModel.devicePCMSampleRate
+        viewModel.syncDeviceAlarmAudio(pcmData, sampleRate: rate) { _ in }
     }
 
     private var cardBackground: some ShapeStyle {

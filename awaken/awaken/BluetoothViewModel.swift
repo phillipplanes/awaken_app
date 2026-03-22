@@ -42,7 +42,6 @@ class BluetoothViewModel: NSObject, ObservableObject {
     private var voiceUploadRetryWorkItem: DispatchWorkItem?
     private var voiceUploadDeadline: Date?
     private var hasDisabledTimeSyncWrites: Bool = false
-    private var hasDisabledVoiceUploadWrites: Bool = false
     private var audioRouteObserver: NSObjectProtocol?
     private var notificationObservers: [NSObjectProtocol] = []
     private var localAlarmFallbackWorkItem: DispatchWorkItem?
@@ -50,6 +49,7 @@ class BluetoothViewModel: NSObject, ObservableObject {
     private var userDisconnectRequested: Bool = false
     private var reconnectAttempts: Int = 0
     private let maxReconnectAttempts: Int = 3
+    private var scanRestartTimer: Timer?
 
     // MARK: - Published
     @Published var connectionStatus: String = "Disconnected"
@@ -178,12 +178,27 @@ class BluetoothViewModel: NSObject, ObservableObject {
     func startScanning() {
         connectionStatus = "Scanning..."
         discoveredPeripherals.removeAll()
-        centralManager.scanForPeripherals(withServices: [ALARM_SERVICE_UUID], options: nil)
+        centralManager.scanForPeripherals(withServices: [ALARM_SERVICE_UUID], options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
+
+        // Restart scan every 3s so we catch the ESP32 after its supervision timeout
+        scanRestartTimer?.invalidate()
+        scanRestartTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            guard let self = self,
+                  self.alarmClockPeripheral == nil || self.alarmClockPeripheral?.state == .disconnected else {
+                self?.scanRestartTimer?.invalidate()
+                self?.scanRestartTimer = nil
+                return
+            }
+            self.centralManager.stopScan()
+            self.centralManager.scanForPeripherals(withServices: [ALARM_SERVICE_UUID], options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
+        }
     }
 
     func connect(to peripheral: CBPeripheral) {
         userDisconnectRequested = false
         connectionStatus = "Connecting..."
+        scanRestartTimer?.invalidate()
+        scanRestartTimer = nil
         centralManager.stopScan()
         alarmClockPeripheral = peripheral
         alarmClockPeripheral?.delegate = self
@@ -409,25 +424,55 @@ class BluetoothViewModel: NSObject, ObservableObject {
         sendSpeakerCommand(Data([1, lo, hi]))
     }
 
+    func playUploadedVoiceOnDevice() {
+        sendSpeakerCommand(Data([0x04]), repeats: 0)
+    }
+
     func playUploadedVoicePreview() {
         sendSpeakerCommand(Data([4]))
     }
 
-    func syncDeviceAlarmAudio(_ pcmData: Data, sampleRate: Int, completion: @escaping (Bool) -> Void) {
-        // Prevent double uploads — cancel any in-progress upload first
-        if !voiceUploadPackets.isEmpty {
-            print("Voice upload already in progress, cancelling previous")
-            finishVoiceUpload(success: false)
+    // MARK: - A2DP Voice Capture
+    /// Start A2DP capture on the ESP32. Call this BEFORE playing audio.
+    func startA2dpCapture() {
+        guard let characteristic = voiceUploadCharacteristic else {
+            print("A2DP capture: no voice upload characteristic")
+            return
         }
+        print("=== A2DP CAPTURE: sending start command ===")
+        _ = writeValue(Data([0x10]), for: characteristic)
+        voiceUploadStatus = "Recording to device..."
+        voiceUploadProgress = 0.1
+    }
 
-        guard !hasDisabledVoiceUploadWrites else {
-            voiceUploadStatus = "Device voice sync unavailable. Built-in device alarm sound will be used."
+    /// Stop A2DP capture on the ESP32. Call this AFTER audio finishes playing.
+    func stopA2dpCapture(completion: @escaping () -> Void) {
+        guard let characteristic = voiceUploadCharacteristic else {
+            completion()
+            return
+        }
+        // Wait for ring buffer drain, then send stop
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+            print("=== A2DP CAPTURE: sending stop command ===")
+            _ = self?.writeValue(Data([0x11]), for: characteristic)
+            self?.voiceUploadProgress = 1.0
+            self?.voiceUploadStatus = "Voice synced to device."
+            completion()
+        }
+    }
+
+    private var voiceUploadInProgress = false
+
+    func syncDeviceAlarmAudio(_ pcmData: Data, sampleRate: Int, completion: @escaping (Bool) -> Void) {
+        guard !voiceUploadInProgress else {
+            print("Voice upload already in progress, skipping duplicate request")
             completion(false)
             return
         }
 
         guard let characteristic = voiceUploadCharacteristic, let peripheral = alarmClockPeripheral else {
-            voiceUploadStatus = "Device voice sync unavailable. Built-in device alarm sound will be used."
+            print("Voice sync blocked: voiceUploadCharacteristic=\(voiceUploadCharacteristic == nil ? "nil" : "ok") alarmClockPeripheral=\(alarmClockPeripheral == nil ? "nil" : "ok")")
+            voiceUploadStatus = "Device not connected for voice sync."
             completion(false)
             return
         }
@@ -438,15 +483,20 @@ class BluetoothViewModel: NSObject, ObservableObject {
             return
         }
 
-        // Use withResponse for reliable delivery — noResp silently drops packets
-        guard let selectedWriteType = writeType(for: characteristic, preferWithoutResponse: false) else {
-            voiceUploadStatus = "Device voice sync unavailable. Built-in device alarm sound will be used."
+        // Must use writeWithoutResponse — ESP32 BLE stack rejects writeWithResponse.
+        guard let selectedWriteType = writeType(for: characteristic, preferWithoutResponse: true) else {
+            print("Voice sync blocked: no writable type found on characteristic (properties=\(characteristic.properties.rawValue))")
+            voiceUploadStatus = "Device voice sync unavailable."
             completion(false)
             return
         }
 
+        voiceUploadInProgress = true
+
         let maxWrite = peripheral.maximumWriteValueLength(for: selectedWriteType)
-        let chunkSize = max(8, min(180, maxWrite - 1))
+        // Use small chunks that fit within default BLE MTU (23 bytes).
+        // Even with MTU negotiation, small chunks are more reliable with writeWithoutResponse.
+        let chunkSize = 19
 
         let firstBytes = pcmData.prefix(16).map { String(format: "%02X", $0) }.joined(separator: " ")
         let durationSec = Double(pcmData.count) / (2.0 * Double(sampleRate))
@@ -476,8 +526,8 @@ class BluetoothViewModel: NSObject, ObservableObject {
         }
         packets.append(Data([3]))
 
-        let dataPackets = packets.count - 2 // exclude begin + end
-        print("  totalPackets: \(packets.count) (1 begin + \(dataPackets) data + 1 end)")
+        let dataPackets = packets.count - 2
+        print("  totalPackets: \(packets.count) (1 begin + \(dataPackets) data + 1 end, writeType=\(selectedWriteType == .withoutResponse ? "noResp" : "withResp"))")
 
         voiceUploadPackets = packets
         voiceUploadPacketIndex = 0
@@ -487,7 +537,7 @@ class BluetoothViewModel: NSObject, ObservableObject {
         voiceUploadStatus = "Syncing \(pcmData.count) bytes (\(String(format: "%.1f", durationSec))s) to device..."
         voiceUploadDeadline = Date().addingTimeInterval(300) // withResponse is slow, allow 5 min
 
-        sendNextVoiceUploadPacket()
+        sendNextVoiceUploadBatch()
     }
 
     var batteryStatusText: String {
@@ -497,7 +547,9 @@ class BluetoothViewModel: NSObject, ObservableObject {
         return hasBatteryTelemetry ? "No battery detected" : "Not available"
     }
 
-    private func sendNextVoiceUploadPacket() {
+    /// Send 1 packet at a time with conservative pacing.
+    /// The ESP32 BLE callback writes to SPIFFS which blocks — we must wait between packets.
+    private func sendNextVoiceUploadBatch() {
         guard let peripheral = alarmClockPeripheral,
               let characteristic = voiceUploadCharacteristic,
               let writeType = voiceUploadWriteType else { return }
@@ -510,40 +562,35 @@ class BluetoothViewModel: NSObject, ObservableObject {
             return
         }
 
-        if writeType == .withResponse {
-            guard voiceUploadPacketIndex < voiceUploadPackets.count else {
-                finishVoiceUpload(success: true)
-                return
-            }
-            peripheral.writeValue(voiceUploadPackets[voiceUploadPacketIndex], for: characteristic, type: .withResponse)
+        guard voiceUploadPacketIndex < voiceUploadPackets.count else {
+            finishVoiceUpload(success: true)
             return
         }
 
-        while voiceUploadPacketIndex < voiceUploadPackets.count {
-            if !peripheral.canSendWriteWithoutResponse {
-                scheduleVoiceUploadRetry()
-                return
-            }
-            peripheral.writeValue(
-                voiceUploadPackets[voiceUploadPacketIndex],
-                for: characteristic,
-                type: .withoutResponse
-            )
+        // Send one packet
+        if peripheral.canSendWriteWithoutResponse {
+            peripheral.writeValue(voiceUploadPackets[voiceUploadPacketIndex], for: characteristic, type: writeType)
             voiceUploadPacketIndex += 1
-            if !voiceUploadPackets.isEmpty {
-                voiceUploadProgress = Double(voiceUploadPacketIndex) / Double(voiceUploadPackets.count)
-            }
         }
 
-        finishVoiceUpload(success: true)
-    }
-
-    private func scheduleVoiceUploadRetry() {
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.sendNextVoiceUploadPacket()
+        if !voiceUploadPackets.isEmpty {
+            voiceUploadProgress = Double(voiceUploadPacketIndex) / Double(voiceUploadPackets.count)
         }
+
+        if voiceUploadPacketIndex % 500 == 0 {
+            print("  upload progress: \(voiceUploadPacketIndex)/\(voiceUploadPackets.count)")
+        }
+
+        guard voiceUploadPacketIndex < voiceUploadPackets.count else {
+            finishVoiceUpload(success: true)
+            return
+        }
+
+        // Pause after BEGIN packet (packet index 1 = first chunk) to let ESP32 open SPIFFS file
+        let delay: TimeInterval = (voiceUploadPacketIndex == 1) ? 1.0 : 0.015
+        let workItem = DispatchWorkItem { [weak self] in self?.sendNextVoiceUploadBatch() }
         voiceUploadRetryWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     private func finishVoiceUpload(success: Bool) {
@@ -565,6 +612,7 @@ class BluetoothViewModel: NSObject, ObservableObject {
             voiceUploadProgress = 0
         }
 
+        voiceUploadInProgress = false
         voiceUploadPackets = []
         voiceUploadPacketIndex = 0
         voiceUploadWriteType = nil
@@ -635,6 +683,8 @@ extension BluetoothViewModel: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        scanRestartTimer?.invalidate()
+        scanRestartTimer = nil
         reconnectAttempts = 0
         userDisconnectRequested = false
         connectionStatus = "Discovering services..."
@@ -659,6 +709,7 @@ extension BluetoothViewModel: CBCentralManagerDelegate {
         hasSpeakerAmp = false
         batteryLevelPercent = nil
         alarmFiring = false
+        voiceUploadInProgress = false
         voiceUploadPackets = []
         voiceUploadPacketIndex = 0
         voiceUploadCompletion = nil
@@ -666,7 +717,6 @@ extension BluetoothViewModel: CBCentralManagerDelegate {
         voiceUploadStatus = ""
         voiceUploadWriteType = nil
         hasDisabledTimeSyncWrites = false
-        hasDisabledVoiceUploadWrites = false
         canSyncGeneratedAudioToDevice = false
         hasBatteryTelemetry = false
         hasVerifiedLiveAlarm = false
@@ -731,7 +781,7 @@ extension BluetoothViewModel: CBPeripheralDelegate {
                 speakerControlCharacteristic = characteristic
             case VOICE_UPLOAD_CHARACTERISTIC_UUID:
                 voiceUploadCharacteristic = characteristic
-                canSyncGeneratedAudioToDevice = writeType(for: characteristic, preferWithoutResponse: false) != nil
+                canSyncGeneratedAudioToDevice = writeType(for: characteristic, preferWithoutResponse: true) != nil
             case TIME_SYNC_CHARACTERISTIC_UUID:
                 timeSyncCharacteristic = characteristic
             case BATTERY_LEVEL_CHARACTERISTIC_UUID:
@@ -763,14 +813,7 @@ extension BluetoothViewModel: CBPeripheralDelegate {
             }
 
             if characteristic.uuid == VOICE_UPLOAD_CHARACTERISTIC_UUID {
-                if voiceUploadWriteType == .withResponse &&
-                    characteristic.properties.contains(.writeWithoutResponse) {
-                    voiceUploadWriteType = .withoutResponse
-                    sendNextVoiceUploadPacket()
-                    return
-                }
-                hasDisabledVoiceUploadWrites = true
-                canSyncGeneratedAudioToDevice = false
+                print("Voice upload write error at packet \(voiceUploadPacketIndex): \(error.localizedDescription)")
                 finishVoiceUpload(success: false)
             }
 
@@ -793,12 +836,12 @@ extension BluetoothViewModel: CBPeripheralDelegate {
             if !voiceUploadPackets.isEmpty {
                 voiceUploadProgress = Double(voiceUploadPacketIndex) / Double(voiceUploadPackets.count)
             }
-            sendNextVoiceUploadPacket()
+            sendNextVoiceUploadBatch()
         }
     }
 
     func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
-        sendNextVoiceUploadPacket()
+        sendNextVoiceUploadBatch()
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -813,7 +856,9 @@ extension BluetoothViewModel: CBPeripheralDelegate {
                 self.alarmFiring = firing
                 if firing {
                     self.localAlarmFallbackActive = false
-                    AlarmNotificationManager.shared.fireImmediateAlarmNotification()
+                    if !self.alarmSoundEnabled {
+                        AlarmNotificationManager.shared.fireImmediateAlarmNotification()
+                    }
                 }
             case BATTERY_LEVEL_CHARACTERISTIC_UUID:
                 self.batteryLevelPercent = data[0] <= 100 ? Int(data[0]) : nil
@@ -823,3 +868,4 @@ extension BluetoothViewModel: CBPeripheralDelegate {
         }
     }
 }
+

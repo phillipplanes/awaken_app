@@ -4,6 +4,8 @@
 <dict>
 	<key>OPENAI_API_KEY</key>
 	<string>REDACTED_OPENAI_KEY</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Awaken needs microphone access to record a custom alarm voice message.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>
