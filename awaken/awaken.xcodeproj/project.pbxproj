@@ -24,6 +24,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		A0000001SECRETS000000000 /* Secrets.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.xcconfig; sourceTree = "<group>"; };
 		292FA2B22F377CA5009651EF /* awaken.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = awaken.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		292FA2BF2F377CA6009651EF /* awakenTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = awakenTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		292FA2C92F377CA6009651EF /* awakenUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = awakenUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -88,6 +89,7 @@
 		292FA2A92F377CA5009651EF = {
 			isa = PBXGroup;
 			children = (
+				A0000001SECRETS000000000 /* Secrets.xcconfig */,
 				292FA2B42F377CA5009651EF /* awaken */,
 				292FA2C22F377CA6009651EF /* awakenTests */,
 				292FA2CC2F377CA6009651EF /* awakenUITests */,
@@ -284,6 +286,7 @@
 /* Begin XCBuildConfiguration section */
 		292FA2D12F377CA6009651EF /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A0000001SECRETS000000000 /* Secrets.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -335,13 +338,11 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				INFOPLIST_KEY_OPENAI_API_KEY = "REDACTED_OPENAI_KEY";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
-				OPENAI_API_KEY = "REDACTED_OPENAI_KEY";
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -350,6 +351,7 @@
 		};
 		292FA2D22F377CA6009651EF /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A0000001SECRETS000000000 /* Secrets.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -395,12 +397,10 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				INFOPLIST_KEY_OPENAI_API_KEY = "REDACTED_OPENAI_KEY";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
-				OPENAI_API_KEY = "REDACTED_OPENAI_KEY";
 				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				VALIDATE_PRODUCT = YES;
@@ -431,7 +431,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				OPENAI_API_KEY = "REDACTED_OPENAI_KEY";
+				OPENAI_API_KEY = "$(inherited)";
 				PRODUCT_BUNDLE_IDENTIFIER = com.phillipplanes.awaken;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -468,7 +468,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				OPENAI_API_KEY = "REDACTED_OPENAI_KEY";
+				OPENAI_API_KEY = "$(inherited)";
 				PRODUCT_BUNDLE_IDENTIFIER = com.phillipplanes.awaken;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

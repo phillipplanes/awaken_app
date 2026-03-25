@@ -1,0 +1,17 @@
+# Secrets
+awaken/Secrets.xcconfig
+
+# Xcode
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+DerivedData/
+
+# macOS
+.DS_Store
+
+# PlatformIO
+.pio/
+
+# YOLO model
+*.pt
