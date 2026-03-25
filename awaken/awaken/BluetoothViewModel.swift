@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import CoreBluetooth
 import AVFAudio
+import AVFoundation
 
 // BLE UUIDs — must match ESP32 firmware
 let ALARM_SERVICE_UUID = CBUUID(string: "4fafc201-1fb5-459e-8fcc-c5c9c331914b")
@@ -43,10 +44,12 @@ class BluetoothViewModel: NSObject, ObservableObject {
     private var voiceUploadDeadline: Date?
     private var hasDisabledTimeSyncWrites: Bool = false
     private var audioRouteObserver: NSObjectProtocol?
+    private var audioRouteDebounce: DispatchWorkItem?
     private var notificationObservers: [NSObjectProtocol] = []
     private var localAlarmFallbackWorkItem: DispatchWorkItem?
     private var pendingAlarmDisplayTime: String?
     private var userDisconnectRequested: Bool = false
+    private var silencePlayer: AVAudioPlayer?
     private var reconnectAttempts: Int = 0
     private let maxReconnectAttempts: Int = 3
     private var scanRestartTimer: Timer?
@@ -104,10 +107,42 @@ class BluetoothViewModel: NSObject, ObservableObject {
     private func configureAudioSession() {
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playback, options: [.allowBluetoothA2DP, .mixWithOthers])
+            try session.setCategory(.playback, options: [.allowBluetoothA2DP])
             try session.setActive(true, options: [])
         } catch {
             print("Audio session setup failed: \(error.localizedDescription)")
+        }
+        startSilenceLoop()
+    }
+
+    /// Plays an inaudible tone on loop to keep the A2DP route from being
+    /// suspended by iOS when no "real" audio is playing.
+    private func startSilenceLoop() {
+        guard silencePlayer == nil else { return }
+        let sampleRate: Double = 44100
+        let duration: Double = 1.0
+        let frameCount = Int(sampleRate * duration)
+        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)) else { return }
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        // Fill with near-zero samples (true zero may be optimized away)
+        if let floatData = buffer.floatChannelData?[0] {
+            for i in 0..<frameCount {
+                floatData[i] = Float.leastNonzeroMagnitude
+            }
+        }
+        // Write to a temp WAV file and loop it
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("awaken_silence.wav")
+        do {
+            let file = try AVAudioFile(forWriting: tempURL, settings: format.settings)
+            try file.write(from: buffer)
+            let player = try AVAudioPlayer(contentsOf: tempURL)
+            player.numberOfLoops = -1
+            player.volume = 0.01
+            player.play()
+            silencePlayer = player
+        } catch {
+            print("Silence loop failed: \(error.localizedDescription)")
         }
     }
 
@@ -117,7 +152,12 @@ class BluetoothViewModel: NSObject, ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.refreshAudioRoute()
+            self?.audioRouteDebounce?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                self?.refreshAudioRoute()
+            }
+            self?.audioRouteDebounce = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
         }
     }
 
@@ -718,6 +758,11 @@ extension BluetoothViewModel: CBCentralManagerDelegate {
                          advertisementData: [String: Any], rssi RSSI: NSNumber) {
         if !discoveredPeripherals.contains(where: { $0.identifier == peripheral.identifier }) {
             discoveredPeripherals.append(peripheral)
+        }
+
+        // Auto-connect: if we find exactly one device advertising our service, connect immediately
+        if alarmClockPeripheral == nil || alarmClockPeripheral?.state == .disconnected {
+            connect(to: peripheral)
         }
     }
 

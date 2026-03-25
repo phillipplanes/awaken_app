@@ -9,19 +9,11 @@ struct SettingsView: View {
     @State private var showResetConfirmation = false
     var onReset: (() -> Void)?
 
-    private var accent: Color { theme.accent }
-    private var warmBase: Color { theme.warmBase }
-    private var warmPaper: Color { theme.warmPaper }
-    private var textPrimary: Color { theme.textPrimary }
-    private var textSecondary: Color { theme.textSecondary }
-    private var controlFill: Color { theme.controlFill }
-    private var cardStroke: Color { theme.cardStroke }
-
     var body: some View {
         NavigationView {
             ZStack {
                 LinearGradient(
-                    colors: [warmBase, warmPaper],
+                    colors: [theme.warmBase, theme.warmPaper],
                     startPoint: .top,
                     endPoint: .bottom
                 )
@@ -34,25 +26,25 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Your Name")
                                 .font(.subheadline.weight(.semibold))
-                                .foregroundColor(textSecondary)
+                                .foregroundColor(theme.textSecondary)
 
                             TextField("First name", text: $firstName)
                                 .font(.title3)
                                 .padding(14)
-                                .background(controlFill)
+                                .background(theme.controlFill)
                                 .cornerRadius(12)
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 12)
-                                        .stroke(cardStroke, lineWidth: 1)
+                                        .stroke(theme.cardStroke, lineWidth: 1)
                                 )
-                                .foregroundColor(textPrimary)
+                                .foregroundColor(theme.textPrimary)
                         }
 
                         // Motivations
                         VStack(alignment: .leading, spacing: 10) {
                             Text("What Motivates You")
                                 .font(.subheadline.weight(.semibold))
-                                .foregroundColor(textSecondary)
+                                .foregroundColor(theme.textSecondary)
 
                             ForEach(UserProfile.motivationOptions, id: \.self) { option in
                                 checkRow(option, isSelected: motivations.contains(option)) {
@@ -69,7 +61,7 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 10) {
                             Text("What Stresses You Out")
                                 .font(.subheadline.weight(.semibold))
-                                .foregroundColor(textSecondary)
+                                .foregroundColor(theme.textSecondary)
 
                             ForEach(UserProfile.stressorOptions, id: \.self) { option in
                                 checkRow(option, isSelected: stressors.contains(option)) {
@@ -86,7 +78,7 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 10) {
                             Text("Appearance")
                                 .font(.subheadline.weight(.semibold))
-                                .foregroundColor(textSecondary)
+                                .foregroundColor(theme.textSecondary)
 
                             Picker("Theme", selection: Binding(
                                 get: { theme.mode },
@@ -126,7 +118,7 @@ struct SettingsView: View {
                         dismiss()
                     }
                     .fontWeight(.semibold)
-                    .foregroundColor(accent)
+                    .foregroundColor(theme.accent)
                 }
             }
         }
@@ -158,19 +150,19 @@ struct SettingsView: View {
             HStack {
                 Text(title)
                     .font(.body)
-                    .foregroundColor(textPrimary)
+                    .foregroundColor(theme.textPrimary)
                 Spacer()
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundColor(isSelected ? accent : textSecondary.opacity(0.4))
+                    .foregroundColor(isSelected ? theme.accent : theme.textSecondary.opacity(0.4))
                     .font(.title3)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
-            .background(isSelected ? accent.opacity(0.08) : controlFill)
+            .background(isSelected ? theme.accent.opacity(0.08) : theme.controlFill)
             .cornerRadius(12)
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke(isSelected ? accent.opacity(0.3) : Color.clear, lineWidth: 1)
+                    .stroke(isSelected ? theme.accent.opacity(0.3) : Color.clear, lineWidth: 1)
             )
         }
     }

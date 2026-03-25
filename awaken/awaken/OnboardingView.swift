@@ -9,28 +9,20 @@ struct OnboardingView: View {
     @State private var stressors: Set<String> = UserProfile.load().stressors
     @FocusState private var focusedField: Bool
 
-    private var accent: Color { theme.accent }
-    private var warmBase: Color { theme.warmBase }
-    private var warmPaper: Color { theme.warmPaper }
-    private var textPrimary: Color { theme.textPrimary }
-    private var textSecondary: Color { theme.textSecondary }
-    private var controlFill: Color { theme.controlFill }
-
     var body: some View {
         ZStack {
             LinearGradient(
-                colors: [warmBase, warmPaper],
+                colors: [theme.warmBase, theme.warmPaper],
                 startPoint: .top,
                 endPoint: .bottom
             )
             .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // Progress dots
                 HStack(spacing: 8) {
                     ForEach(0..<3) { i in
                         Circle()
-                            .fill(i <= page ? accent : controlFill)
+                            .fill(i <= page ? theme.accent : theme.controlFill)
                             .frame(width: 8, height: 8)
                     }
                 }
@@ -56,20 +48,20 @@ struct OnboardingView: View {
 
             Text("Hi.")
                 .font(.system(size: 52, weight: .bold, design: .rounded))
-                .foregroundColor(textPrimary)
+                .foregroundColor(theme.textPrimary)
 
             Text("Time to")
                 .font(.system(size: 32, weight: .semibold, design: .default))
-                .foregroundColor(textSecondary)
+                .foregroundColor(theme.textSecondary)
 
             Text("AWAKEN")
                 .font(.system(size: 48, weight: .black, design: .default))
                 .tracking(4)
-                .foregroundColor(accent)
+                .foregroundColor(theme.accent)
 
             Text("What's your\nfirst name?")
                 .font(.system(size: 32, weight: .semibold, design: .rounded))
-                .foregroundColor(textSecondary)
+                .foregroundColor(theme.textSecondary)
                 .multilineTextAlignment(.center)
 
             TextField("Your first name", text: $firstName)
@@ -78,13 +70,13 @@ struct OnboardingView: View {
                 .multilineTextAlignment(.center)
                 .padding(.vertical, 20)
                 .padding(.horizontal, 24)
-                .background(controlFill)
+                .background(theme.controlFill)
                 .cornerRadius(18)
                 .overlay(
                     RoundedRectangle(cornerRadius: 18)
-                        .stroke(accent.opacity(0.4), lineWidth: 2)
+                        .stroke(theme.accent.opacity(0.4), lineWidth: 2)
                 )
-                .foregroundColor(textPrimary)
+                .foregroundColor(theme.textPrimary)
                 .padding(.horizontal, 40)
 
             Spacer()
@@ -99,12 +91,12 @@ struct OnboardingView: View {
         VStack(spacing: 20) {
             Text("What motivates you?")
                 .font(.title2.weight(.bold))
-                .foregroundColor(textPrimary)
+                .foregroundColor(theme.textPrimary)
                 .padding(.top, 20)
 
             Text("Select all that apply. This helps craft your wake-up messages.")
                 .font(.subheadline)
-                .foregroundColor(textSecondary)
+                .foregroundColor(theme.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
 
@@ -130,12 +122,12 @@ struct OnboardingView: View {
         VStack(spacing: 20) {
             Text("What stresses you out?")
                 .font(.title2.weight(.bold))
-                .foregroundColor(textPrimary)
+                .foregroundColor(theme.textPrimary)
                 .padding(.top, 20)
 
             Text("Your alarm messages will gently help you face these.")
                 .font(.subheadline)
-                .foregroundColor(textSecondary)
+                .foregroundColor(theme.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
 
@@ -158,7 +150,7 @@ struct OnboardingView: View {
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
-                    .background(stressors.isEmpty ? accent.opacity(0.4) : accent)
+                    .background(stressors.isEmpty ? theme.accent.opacity(0.4) : theme.accent)
                     .cornerRadius(14)
             }
             .disabled(stressors.isEmpty)
@@ -174,19 +166,19 @@ struct OnboardingView: View {
             HStack {
                 Text(title)
                     .font(.body)
-                    .foregroundColor(textPrimary)
+                    .foregroundColor(theme.textPrimary)
                 Spacer()
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundColor(isSelected ? accent : textSecondary.opacity(0.4))
+                    .foregroundColor(isSelected ? theme.accent : theme.textSecondary.opacity(0.4))
                     .font(.title3)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
-            .background(isSelected ? accent.opacity(0.08) : warmPaper)
+            .background(isSelected ? theme.accent.opacity(0.08) : theme.warmPaper)
             .cornerRadius(12)
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke(isSelected ? accent.opacity(0.3) : Color.clear, lineWidth: 1)
+                    .stroke(isSelected ? theme.accent.opacity(0.3) : Color.clear, lineWidth: 1)
             )
         }
     }
@@ -203,7 +195,7 @@ struct OnboardingView: View {
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 16)
-                .background(disabled ? accent.opacity(0.4) : accent)
+                .background(disabled ? theme.accent.opacity(0.4) : theme.accent)
                 .cornerRadius(14)
         }
         .disabled(disabled)
