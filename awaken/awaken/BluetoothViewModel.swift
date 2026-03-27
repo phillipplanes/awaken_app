@@ -76,6 +76,8 @@ class BluetoothViewModel: NSObject, ObservableObject {
     @Published var hasVerifiedLiveAlarm: Bool = false
     @Published var liveAlarmVerificationMessage: String = ""
     @Published var scheduledAlarmDisplayTime: String?
+    @Published var scheduledAlarms: [ScheduledAlarm] = ScheduledAlarm.loadAll()
+    @Published var editingAlarmID: UUID?
     @Published var localAlarmFallbackActive: Bool = false
 
     private static let bleRestoreIdentifier = "com.awaken.centralManager"
@@ -200,7 +202,7 @@ class BluetoothViewModel: NSObject, ObservableObject {
         let isAwakenRouteActive = hasAwakenName || hasA2DPRoute
         let status: String
         if hasAwakenName {
-            status = "AWAKEN-Stream selected"
+            status = "AWAKEN-audio connected"
         } else if hasA2DPRoute {
             status = "Bluetooth A2DP active: \(outputName)"
         } else {
@@ -309,84 +311,112 @@ class BluetoothViewModel: NSObject, ObservableObject {
     }
 
     // MARK: - Alarm
-    func setAlarm(time: Date, repeatDays: Set<Int> = []) {
-        guard let characteristic = alarmCharacteristic else {
-            hasVerifiedLiveAlarm = false
-            liveAlarmVerificationMessage = "Alarm set failed: device not ready"
+
+    func setAlarm(time: Date, repeatDays: Set<Int> = [], wakeEffect: UInt8 = 1,
+                  alarmType: AlarmType = .focus, voiceOption: VoiceOption = .shimmer,
+                  audioOutput: AlarmAudioOutput = .phone, editingID: UUID? = nil) {
+        let calendar = Calendar.current
+        let hour = calendar.component(.hour, from: time)
+        let minute = calendar.component(.minute, from: time)
+
+        // Create or update the ScheduledAlarm
+        var alarm = ScheduledAlarm(
+            id: editingID ?? UUID(),
+            hour: hour,
+            minute: minute,
+            repeatDays: repeatDays,
+            wakeEffect: wakeEffect,
+            alarmType: alarmType.rawValue,
+            voiceOption: voiceOption.rawValue,
+            audioOutput: audioOutput.rawValue
+        )
+
+        if let editingID {
+            if let idx = scheduledAlarms.firstIndex(where: { $0.id == editingID }) {
+                alarm.createdAt = scheduledAlarms[idx].createdAt
+                scheduledAlarms[idx] = alarm
+            } else {
+                scheduledAlarms.append(alarm)
+            }
+        } else {
+            scheduledAlarms.append(alarm)
+        }
+        ScheduledAlarm.saveAll(scheduledAlarms)
+        editingAlarmID = nil
+
+        // Send the soonest alarm to the device
+        sendNextAlarmToDevice()
+    }
+
+    func deleteAlarm(_ alarm: ScheduledAlarm) {
+        scheduledAlarms.removeAll { $0.id == alarm.id }
+        ScheduledAlarm.saveAll(scheduledAlarms)
+
+        if scheduledAlarms.isEmpty {
+            stopAlarm()
+        } else {
+            sendNextAlarmToDevice()
+        }
+    }
+
+    func toggleAlarm(_ alarm: ScheduledAlarm) {
+        guard let idx = scheduledAlarms.firstIndex(where: { $0.id == alarm.id }) else { return }
+        scheduledAlarms[idx].isEnabled.toggle()
+        ScheduledAlarm.saveAll(scheduledAlarms)
+        sendNextAlarmToDevice()
+    }
+
+    /// Find the soonest enabled alarm and send it to the ESP32.
+    func sendNextAlarmToDevice() {
+        let enabled = scheduledAlarms.filter { $0.isEnabled }
+        guard !enabled.isEmpty else {
+            scheduledAlarmDisplayTime = nil
+            clearLocalAlarmFallback()
+            Task { await AlarmNotificationManager.shared.cancelPhoneAlarm() }
             return
+        }
+
+        let now = Date()
+        guard let soonest = enabled.min(by: { $0.nextFireDate(after: now) < $1.nextFireDate(after: now) }) else { return }
+
+        let target = soonest.nextFireDate(after: now)
+        let delaySeconds = max(1, Int(target.timeIntervalSince(now)))
+        let timeString = String(format: "%02d:%02d", soonest.hour, soonest.minute)
+
+        var repeatMask = 0
+        for day in soonest.repeatDays {
+            let bit = day - 1
+            if bit >= 0 && bit <= 6 { repeatMask |= (1 << bit) }
+        }
+        let payload = "\(timeString)|\(delaySeconds)|\(repeatMask)"
+
+        pendingAlarmDisplayTime = soonest.displayTime
+        scheduledAlarmDisplayTime = pendingAlarmDisplayTime
+
+        scheduleLocalAlarmFallback(for: target, displayTime: pendingAlarmDisplayTime)
+        if alarmSoundEnabled {
+            Task { await AlarmNotificationManager.shared.cancelPhoneAlarm() }
+        } else {
+            AlarmNotificationManager.shared.schedulePhoneAlarm(for: target, displayTime: pendingAlarmDisplayTime)
         }
 
         sendTimeSync()
 
-        let payloadFormatter = DateFormatter()
-        payloadFormatter.dateFormat = "HH:mm"
-        let timeString = payloadFormatter.string(from: time)
-        let now = Date()
-        let target: Date
-        if repeatDays.isEmpty {
-            target = time <= now ? time.addingTimeInterval(24 * 60 * 60) : time
-        } else {
-            target = nextOccurrence(of: time, on: repeatDays, after: now)
-        }
-        let delaySeconds = max(1, Int(target.timeIntervalSince(now)))
-
-        // Build repeat bitmask: bit0=Sun(1), bit1=Mon(2), ..., bit6=Sat(7)
-        var repeatMask = 0
-        for day in repeatDays {
-            let bit = day - 1 // Convert 1-based weekday to 0-based bit index
-            if bit >= 0 && bit <= 6 {
-                repeatMask |= (1 << bit)
-            }
-        }
-        let payload = "\(timeString)|\(delaySeconds)|\(repeatMask)"
-
-        let displayFormatter = DateFormatter()
-        displayFormatter.dateFormat = "h:mm a"
-        pendingAlarmDisplayTime = displayFormatter.string(from: time)
-        scheduledAlarmDisplayTime = pendingAlarmDisplayTime
-        scheduleLocalAlarmFallback(for: target, displayTime: pendingAlarmDisplayTime)
-        if alarmSoundEnabled {
-            Task {
-                await AlarmNotificationManager.shared.cancelPhoneAlarm()
-            }
-        } else {
-            AlarmNotificationManager.shared.schedulePhoneAlarm(
-                for: target,
-                displayTime: pendingAlarmDisplayTime
-            )
-        }
-
         hasVerifiedLiveAlarm = false
         liveAlarmVerificationMessage = "Verifying live alarm..."
 
-        guard let data = payload.data(using: .utf8) else { return }
+        guard let characteristic = alarmCharacteristic,
+              let data = payload.data(using: .utf8) else {
+            hasVerifiedLiveAlarm = false
+            liveAlarmVerificationMessage = "Alarm saved locally (device not ready)"
+            return
+        }
         let writeType = writeValue(data, for: characteristic)
         if writeType == .withoutResponse {
             hasVerifiedLiveAlarm = true
             liveAlarmVerificationMessage = "Alarm sent for \(pendingAlarmDisplayTime ?? "scheduled time")"
             pendingAlarmDisplayTime = nil
         }
-    }
-
-    /// Find the next Date matching any of the given weekdays (1=Sun..7=Sat) at the same time-of-day.
-    private func nextOccurrence(of time: Date, on weekdays: Set<Int>, after now: Date) -> Date {
-        let calendar = Calendar.current
-        let timeComponents = calendar.dateComponents([.hour, .minute], from: time)
-        for dayOffset in 0..<8 {
-            guard let candidate = calendar.date(byAdding: .day, value: dayOffset, to: now) else { continue }
-            var components = calendar.dateComponents([.year, .month, .day], from: candidate)
-            components.hour = timeComponents.hour
-            components.minute = timeComponents.minute
-            components.second = 0
-            guard let target = calendar.date(from: components) else { continue }
-            if target <= now { continue }
-            let weekday = calendar.component(.weekday, from: target) // 1=Sun..7=Sat
-            if weekdays.contains(weekday) {
-                return target
-            }
-        }
-        // Fallback: tomorrow
-        return time.addingTimeInterval(24 * 60 * 60)
     }
 
     private func sendTimeSync() {
@@ -413,9 +443,20 @@ class BluetoothViewModel: NSObject, ObservableObject {
         hasVerifiedLiveAlarm = false
         liveAlarmVerificationMessage = ""
         pendingAlarmDisplayTime = nil
-        scheduledAlarmDisplayTime = nil
         clearLocalAlarmFallback()
         alarmFiring = false
+        localAlarmFallbackActive = false
+
+        // Remove one-time alarms that just fired; keep repeating ones
+        scheduledAlarms.removeAll { $0.repeatDays.isEmpty }
+        ScheduledAlarm.saveAll(scheduledAlarms)
+
+        // Re-arm next alarm if any remain
+        if !scheduledAlarms.isEmpty {
+            sendNextAlarmToDevice()
+        } else {
+            scheduledAlarmDisplayTime = nil
+        }
         Task {
             await AlarmNotificationManager.shared.cancelPhoneAlarm()
         }
@@ -748,6 +789,14 @@ extension BluetoothViewModel: CBCentralManagerDelegate {
             if let peripheral = alarmClockPeripheral, peripheral.state == .disconnected {
                 central.connect(peripheral, options: nil)
             }
+            // Pick up peripherals iOS still has connected (e.g. after Xcode rebuild)
+            let alreadyConnected = central.retrieveConnectedPeripherals(withServices: [ALARM_SERVICE_UUID])
+            if let existing = alreadyConnected.first, alarmClockPeripheral == nil {
+                alarmClockPeripheral = existing
+                existing.delegate = self
+                connectionStatus = "Connected"
+                existing.discoverServices([ALARM_SERVICE_UUID])
+            }
             startScanning()
         } else {
             connectionStatus = "Bluetooth is not available."
@@ -881,6 +930,12 @@ extension BluetoothViewModel: CBPeripheralDelegate {
         if alarmCharacteristic != nil {
             connectionStatus = "Connected"
             sendTimeSync()
+            // Re-send the next alarm to the device on reconnect
+            if !scheduledAlarms.filter({ $0.isEnabled }).isEmpty {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    self?.sendNextAlarmToDevice()
+                }
+            }
         }
     }
 

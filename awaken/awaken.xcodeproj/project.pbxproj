@@ -24,10 +24,10 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		A0000001SECRETS000000000 /* Secrets.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.xcconfig; sourceTree = "<group>"; };
 		292FA2B22F377CA5009651EF /* awaken.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = awaken.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		292FA2BF2F377CA6009651EF /* awakenTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = awakenTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		292FA2C92F377CA6009651EF /* awakenUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = awakenUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A0000001SECRETS000000000 /* Secrets.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */

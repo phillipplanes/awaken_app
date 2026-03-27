@@ -1141,7 +1141,7 @@ void setup() {
     initBatteryMonitor();
 
     // --- BLE ---
-    BLEDevice::init("Awaken-Control");
+    BLEDevice::init("AWAKEN-manage");
     BLEServer *pServer = BLEDevice::createServer();
     pServer->setCallbacks(new MyServerCallbacks());
     BLEService *pService = pServer->createService(BLEUUID(SERVICE_UUID), 30);

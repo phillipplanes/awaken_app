@@ -16,7 +16,7 @@ static constexpr i2s_port_t I2S_PORT = I2S_NUM_0;
 static constexpr int I2S_BCLK_PIN = 26;
 static constexpr int I2S_LRCLK_PIN = 27;
 static constexpr int I2S_DOUT_PIN = 25; // ESP32 -> MAX98357A DIN
-static constexpr const char *DEVICE_NAME_PREFIX = "Awaken-Stream-Standalone";
+static constexpr const char *DEVICE_NAME_PREFIX = "AWAKEN-audio";
 static constexpr uint8_t A2DP_STARTUP_VOLUME = 55; // 0-127 inside library
 char deviceName[48] = {0};
 
@@ -25,7 +25,7 @@ BluetoothA2DPSinkQueued a2dpSink;
 void initDeviceName() {
     uint8_t btMac[6] = {0};
     esp_read_mac(btMac, ESP_MAC_BT);
-    snprintf(deviceName, sizeof(deviceName), "%s-%02X%02X", DEVICE_NAME_PREFIX, btMac[4], btMac[5]);
+    snprintf(deviceName, sizeof(deviceName), "%s", DEVICE_NAME_PREFIX);
 }
 
 void setup() {
@@ -33,7 +33,7 @@ void setup() {
     delay(250);
     initDeviceName();
     Serial.println();
-    Serial.print("Awaken A2DP sink (");
+    Serial.print("AWAKEN A2DP sink (");
     Serial.print(BOARD_NAME);
     Serial.println(" + MAX98357A)");
     Serial.println("Audio out: I2S BCLK=26 LRCLK=27 DOUT=25");

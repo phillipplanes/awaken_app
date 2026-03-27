@@ -4,7 +4,7 @@ import AVFoundation
 import os
 
 @MainActor
-final class VoiceMessageViewModel: ObservableObject {
+final class VoiceMessageViewModel: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private let logger = Logger(subsystem: "com.phillipplanes.awaken", category: "voice")
     enum Status {
         case idle
@@ -107,9 +107,23 @@ final class VoiceMessageViewModel: ObservableObject {
         playAudioFile(url: audioURL, loops: false)
     }
 
+    private var isPlayingAlarm = false
+    private var alarmReplayWork: DispatchWorkItem?
+    private static let alarmReplayDelay: TimeInterval = 6.0
+
     func playAlarmAudioIfAvailable() {
-        guard let audioURL else { return }
-        playAudioFile(url: audioURL, loops: true)
+        guard let audioURL else {
+            logger.warning("playAlarmAudioIfAvailable: no audioURL")
+            return
+        }
+        // Guard against re-entry — only one alarm audio instance at a time
+        guard !isPlayingAlarm else {
+            logger.info("playAlarmAudioIfAvailable: already playing, skipping")
+            return
+        }
+        logger.info("playAlarmAudioIfAvailable: starting alarm audio")
+        isPlayingAlarm = true
+        playAudioFile(url: audioURL, loops: false)
     }
 
     func playTestTone(frequencyHz: Double, durationSeconds: Double = 0.3) {
@@ -128,7 +142,12 @@ final class VoiceMessageViewModel: ObservableObject {
     }
 
     func stopAlarmAudio() {
+        logger.info("stopAlarmAudio called")
+        alarmReplayWork?.cancel()
+        alarmReplayWork = nil
         audioPlayer?.stop()
+        audioPlayer = nil
+        isPlayingAlarm = false
     }
 
     // MARK: - Microphone Recording
@@ -232,13 +251,35 @@ final class VoiceMessageViewModel: ObservableObject {
     }
 
     private func playAudioFile(url: URL, loops: Bool) {
+        // Stop any existing player to prevent overlapping audio instances
+        audioPlayer?.stop()
+        audioPlayer = nil
         do {
-            audioPlayer = try AVAudioPlayer(contentsOf: url)
-            audioPlayer?.numberOfLoops = loops ? -1 : 0
-            audioPlayer?.prepareToPlay()
-            audioPlayer?.play()
+            let player = try AVAudioPlayer(contentsOf: url)
+            player.numberOfLoops = loops ? -1 : 0
+            player.delegate = self
+            player.prepareToPlay()
+            player.play()
+            audioPlayer = player
         } catch {
             status = .failed("Could not play generated audio.")
+        }
+    }
+
+    // Called when playback finishes — replays alarm audio after a 6s pause
+    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.logger.info("audioPlayerDidFinishPlaying: flag=\(flag), isPlayingAlarm=\(self.isPlayingAlarm)")
+            guard self.isPlayingAlarm, let url = self.audioURL else { return }
+            self.logger.info("Scheduling alarm replay in \(Self.alarmReplayDelay)s")
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.isPlayingAlarm, let url = self.audioURL else { return }
+                self.logger.info("Replaying alarm audio")
+                self.playAudioFile(url: url, loops: false)
+            }
+            self.alarmReplayWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.alarmReplayDelay, execute: work)
         }
     }
 

@@ -80,8 +80,8 @@ static constexpr uint8_t CUSTOM_EFFECT_SINE_RAMP = 124;
 static constexpr unsigned long CUSTOM_HAPTIC_CYCLE_MS = 60000;
 static constexpr unsigned long CUSTOM_HAPTIC_UPDATE_INTERVAL_MS = 40;
 
-static constexpr const char *BLE_NAME_PREFIX = "Awaken-Control";
-static constexpr const char *A2DP_NAME_PREFIX = "Awaken-Stream-Hybrid";
+static constexpr const char *BLE_NAME_PREFIX = "AWAKEN-manage";
+static constexpr const char *A2DP_NAME_PREFIX = "AWAKEN-audio";
 static constexpr uint8_t A2DP_STARTUP_VOLUME = 55; // 0..127
 char bleName[32] = {0};
 char a2dpName[40] = {0};
@@ -430,8 +430,8 @@ void initDeviceNames() {
     if (namesInitialized) return;
     uint8_t btMac[6] = {0};
     esp_read_mac(btMac, ESP_MAC_BT);
-    snprintf(bleName, sizeof(bleName), "%s-%02X%02X", BLE_NAME_PREFIX, btMac[4], btMac[5]);
-    snprintf(a2dpName, sizeof(a2dpName), "%s-%02X%02X", A2DP_NAME_PREFIX, btMac[4], btMac[5]);
+    snprintf(bleName, sizeof(bleName), "%s", BLE_NAME_PREFIX);
+    snprintf(a2dpName, sizeof(a2dpName), "%s", A2DP_NAME_PREFIX);
     namesInitialized = true;
 }
 

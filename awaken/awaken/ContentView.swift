@@ -4,12 +4,7 @@ struct ContentView: View {
     @StateObject private var viewModel = BluetoothViewModel()
     @StateObject private var weatherViewModel = AlarmWeatherViewModel()
     @StateObject private var voiceMessageViewModel = VoiceMessageViewModel()
-    @State private var alarmTime = Date()
-    @State private var alarmType: AlarmType = .focus
-    @State private var voiceOption: VoiceOption = .shimmer
-    @State private var selectedWakeEffect: UInt8 = 1
     @State private var alarmAudioOutput: AlarmAudioOutput = .phone
-    @State private var repeatDays: Set<Int> = []
     @State private var showTestSection = false
     @EnvironmentObject private var theme: AppTheme
     @EnvironmentObject private var appState: AppState
@@ -34,12 +29,7 @@ struct ContentView: View {
                     viewModel: viewModel,
                     voiceMessageViewModel: voiceMessageViewModel,
                     weatherViewModel: weatherViewModel,
-                    alarmTime: $alarmTime,
-                    alarmType: $alarmType,
-                    voiceOption: $voiceOption,
-                    selectedWakeEffect: $selectedWakeEffect,
                     alarmAudioOutput: $alarmAudioOutput,
-                    repeatDays: $repeatDays,
                     showTestSection: $showTestSection
                 )
             } else {
@@ -57,11 +47,5 @@ struct ContentView: View {
         }
         .foregroundStyle(theme.textPrimary)
         .animation(.easeInOut(duration: 0.3), value: isAlarmAlertVisible)
-    }
-}
-
-struct ContentView_Previews: PreviewProvider {
-    static var previews: some View {
-        ContentView()
     }
 }
