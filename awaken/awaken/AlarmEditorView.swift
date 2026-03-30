@@ -320,10 +320,12 @@ struct AlarmEditorView: View {
     }
 
     private func saveAlarm() {
+        print("[ALARM-EDITOR] saveAlarm called, audioOutput=\(alarmAudioOutput.rawValue), editingID=\(String(describing: editingID))")
         viewModel.setAlarmSoundEnabled(alarmAudioOutput == .deviceSpeaker)
 
         if alarmAudioOutput == .deviceSpeaker,
            let pcmData = voiceMessageViewModel.devicePCMData, !pcmData.isEmpty {
+            print("[ALARM-EDITOR] taking deviceSpeaker+PCM path")
             let time = alarmTime
             let days = repeatDays
             let effect = selectedWakeEffect
@@ -339,6 +341,7 @@ struct AlarmEditorView: View {
                 viewModel.setWakeEffect(effect)
             }
         } else {
+            print("[ALARM-EDITOR] taking default (phone) path")
             viewModel.setAlarm(time: alarmTime, repeatDays: repeatDays, wakeEffect: selectedWakeEffect,
                                alarmType: alarmType, voiceOption: voiceOption, audioOutput: alarmAudioOutput,
                                editingID: editingID)

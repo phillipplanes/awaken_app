@@ -438,7 +438,13 @@ void initDeviceNames() {
 void onA2dpConnectionStateChanged(esp_a2d_connection_state_t state, void *) {
     a2dpConnected = (state == ESP_A2D_CONNECTION_STATE_CONNECTED);
     Serial.print("A2DP connection state: ");
-    Serial.println(a2dpSink.to_str(state));
+    Serial.print(a2dpSink.to_str(state));
+    if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+        Serial.print(" (disc_rsn=");
+        Serial.print(a2dpSink.get_connection_state() == ESP_A2D_CONNECTION_STATE_DISCONNECTED ? "remote" : "local");
+        Serial.print(")");
+    }
+    Serial.println();
 }
 
 void onA2dpAudioStateChanged(esp_a2d_audio_state_t state, void *) {
@@ -1480,20 +1486,10 @@ void setupA2dp() {
     a2dpSink.set_on_audio_state_changed(onA2dpAudioStateChanged);
     a2dpSink.set_reconnect_delay(1500);
 
-    // Clear stale bonding keys — prevents "Pairing Unsuccessful" after
-    // the phone forgets the device. Fresh pairing on each boot.
+    // Keep bonding keys so iOS A2DP stays authenticated across reconnects.
+    // If pairing fails, forget the device on the phone and re-pair.
     int bondedCount = esp_bt_gap_get_bond_device_num();
-    if (bondedCount > 0) {
-        esp_bd_addr_t *bondedDevices = (esp_bd_addr_t *)malloc(bondedCount * sizeof(esp_bd_addr_t));
-        if (bondedDevices) {
-            esp_bt_gap_get_bond_device_list(&bondedCount, bondedDevices);
-            for (int i = 0; i < bondedCount; i++) {
-                esp_bt_gap_remove_bond_device(bondedDevices[i]);
-            }
-            free(bondedDevices);
-            Serial.printf("[BT] Cleared %d stale bond(s)\n", bondedCount);
-        }
-    }
+    Serial.printf("[BT] %d existing bond(s) retained\n", bondedCount);
 
     a2dpSink.start(a2dpName, true);
     a2dpSink.set_connectable(true);
@@ -1554,6 +1550,19 @@ void setup() {
     setupA2dp();
     setupBle();
     ensureClassicNameAndDiscoverable();
+
+    // Startup chime — confirms speaker is working
+    {
+        uint8_t savedVol = speakerVolume;
+        speakerVolume = 40;
+        // C5, E5, G5, C6 — a bright major arpeggio
+        playSpeakerTone(523, 100);  delay(30);
+        playSpeakerTone(659, 100);  delay(30);
+        playSpeakerTone(784, 100);  delay(30);
+        playSpeakerTone(1047, 180);
+        speakerVolume = savedVol;
+        Serial.println("Startup chime played");
+    }
 
     // Start at low CPU since nothing is active yet
     setCpuFrequencyMhz(80);

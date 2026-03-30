@@ -49,7 +49,6 @@ class BluetoothViewModel: NSObject, ObservableObject {
     private var localAlarmFallbackWorkItem: DispatchWorkItem?
     private var pendingAlarmDisplayTime: String?
     private var userDisconnectRequested: Bool = false
-    private var silencePlayer: AVAudioPlayer?
     private var reconnectAttempts: Int = 0
     private let maxReconnectAttempts: Int = 3
     private var scanRestartTimer: Timer?
@@ -81,6 +80,7 @@ class BluetoothViewModel: NSObject, ObservableObject {
     @Published var localAlarmFallbackActive: Bool = false
 
     private static let bleRestoreIdentifier = "com.awaken.centralManager"
+    private static let savedPeripheralKey = "com.awaken.lastPeripheralUUID"
 
     // MARK: - Init
     override init() {
@@ -113,38 +113,6 @@ class BluetoothViewModel: NSObject, ObservableObject {
             try session.setActive(true, options: [])
         } catch {
             print("Audio session setup failed: \(error.localizedDescription)")
-        }
-        startSilenceLoop()
-    }
-
-    /// Plays an inaudible tone on loop to keep the A2DP route from being
-    /// suspended by iOS when no "real" audio is playing.
-    private func startSilenceLoop() {
-        guard silencePlayer == nil else { return }
-        let sampleRate: Double = 44100
-        let duration: Double = 1.0
-        let frameCount = Int(sampleRate * duration)
-        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)) else { return }
-        buffer.frameLength = AVAudioFrameCount(frameCount)
-        // Fill with near-zero samples (true zero may be optimized away)
-        if let floatData = buffer.floatChannelData?[0] {
-            for i in 0..<frameCount {
-                floatData[i] = Float.leastNonzeroMagnitude
-            }
-        }
-        // Write to a temp WAV file and loop it
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("awaken_silence.wav")
-        do {
-            let file = try AVAudioFile(forWriting: tempURL, settings: format.settings)
-            try file.write(from: buffer)
-            let player = try AVAudioPlayer(contentsOf: tempURL)
-            player.numberOfLoops = -1
-            player.volume = 0.01
-            player.play()
-            silencePlayer = player
-        } catch {
-            print("Silence loop failed: \(error.localizedDescription)")
         }
     }
 
@@ -318,6 +286,7 @@ class BluetoothViewModel: NSObject, ObservableObject {
         let calendar = Calendar.current
         let hour = calendar.component(.hour, from: time)
         let minute = calendar.component(.minute, from: time)
+        print("[ALARM] setAlarm called: \(hour):\(minute) repeatDays=\(repeatDays) editingID=\(String(describing: editingID))")
 
         // Create or update the ScheduledAlarm
         var alarm = ScheduledAlarm(
@@ -342,6 +311,7 @@ class BluetoothViewModel: NSObject, ObservableObject {
             scheduledAlarms.append(alarm)
         }
         ScheduledAlarm.saveAll(scheduledAlarms)
+        print("[ALARM] Saved \(scheduledAlarms.count) alarms to UserDefaults")
         editingAlarmID = nil
 
         // Send the soonest alarm to the device
@@ -797,6 +767,19 @@ extension BluetoothViewModel: CBCentralManagerDelegate {
                 connectionStatus = "Connected"
                 existing.discoverServices([ALARM_SERVICE_UUID])
             }
+            // Queue a background reconnection to the last-known peripheral.
+            // CoreBluetooth will connect as soon as the ESP32 advertises again.
+            // We do NOT set alarmClockPeripheral here so scanning continues normally.
+            if alarmClockPeripheral == nil,
+               let savedUUID = UserDefaults.standard.string(forKey: Self.savedPeripheralKey),
+               let uuid = UUID(uuidString: savedUUID) {
+                let known = central.retrievePeripherals(withIdentifiers: [uuid])
+                if let peripheral = known.first {
+                    print("[BLE] Queuing reconnect to saved peripheral \(uuid)")
+                    peripheral.delegate = self
+                    central.connect(peripheral, options: nil)
+                }
+            }
             startScanning()
         } else {
             connectionStatus = "Bluetooth is not available."
@@ -818,11 +801,19 @@ extension BluetoothViewModel: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         scanRestartTimer?.invalidate()
         scanRestartTimer = nil
+        central.stopScan()
         reconnectAttempts = 0
         userDisconnectRequested = false
+        // Adopt the peripheral if it came from a queued reconnect
+        if alarmClockPeripheral == nil {
+            alarmClockPeripheral = peripheral
+            peripheral.delegate = self
+        }
         connectionStatus = "Discovering services..."
         peripheral.discoverServices([ALARM_SERVICE_UUID])
         refreshAudioRoute()
+        // Remember this peripheral so we can reconnect after Xcode rebuilds
+        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedPeripheralKey)
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {

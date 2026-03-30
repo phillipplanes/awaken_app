@@ -1,4 +1,5 @@
 import SwiftUI
+import AVKit
 
 struct ConnectedView: View {
     @ObservedObject var viewModel: BluetoothViewModel
@@ -27,49 +28,57 @@ struct ConnectedView: View {
 
     var body: some View {
         NavigationView {
-            ScrollView {
-                connectedContent
-                    .padding(.horizontal)
-            }
-            .toolbarBackground(.hidden, for: .navigationBar)
-            .navigationTitle("AWAKEN")
-            .toolbar { connectedToolbar }
-            .sheet(isPresented: $showSettings) {
-                SettingsView { appState.onboardingComplete = false }
-                    .environmentObject(theme)
-            }
-            .sheet(isPresented: $showAlarmEditor) {
-                AlarmEditorView(
-                    viewModel: viewModel,
-                    voiceMessageViewModel: voiceMessageViewModel,
-                    weatherViewModel: weatherViewModel,
-                    alarmTime: editorAlarmTime,
-                    repeatDays: editorRepeatDays,
-                    selectedWakeEffect: editorWakeEffect,
-                    alarmType: editorAlarmType,
-                    voiceOption: editorVoiceOption,
-                    alarmAudioOutput: editorAudioOutput,
-                    editingID: editorEditingID
-                )
+            connectedScrollView
+        }
+    }
+
+    private var connectedScrollView: some View {
+        ScrollView {
+            connectedContent
+                .padding(.horizontal)
+        }
+        .toolbarBackground(.hidden, for: .navigationBar)
+        .navigationTitle("AWAKEN")
+        .toolbar { connectedToolbar }
+        .sheet(isPresented: $showSettings) {
+            SettingsView { appState.onboardingComplete = false }
                 .environmentObject(theme)
-            }
-            .safeAreaInset(edge: .bottom) {
-                if viewModel.alarmFiring || viewModel.localAlarmFallbackActive {
-                    AlarmQuickActionsBar(viewModel: viewModel, voiceMessageViewModel: voiceMessageViewModel)
-                }
-            }
-            .onAppear { applyAlarmAudioOutput() }
-            .onChange(of: viewModel.connectionStatus) { _, newStatus in
-                if newStatus == "Connected" { applyAlarmAudioOutput() }
-            }
-            .onChange(of: alarmAudioOutput) { _, _ in applyAlarmAudioOutput() }
-            .onChange(of: viewModel.alarmFiring) { _, firing in
-                handleAlarmVisibilityChange(firing || viewModel.localAlarmFallbackActive)
-            }
-            .onChange(of: viewModel.localAlarmFallbackActive) { _, fallback in
-                handleAlarmVisibilityChange(viewModel.alarmFiring || fallback)
+        }
+        .sheet(isPresented: $showAlarmEditor) {
+            alarmEditorSheet
+        }
+        .safeAreaInset(edge: .bottom) {
+            if viewModel.alarmFiring || viewModel.localAlarmFallbackActive {
+                AlarmQuickActionsBar(viewModel: viewModel, voiceMessageViewModel: voiceMessageViewModel)
             }
         }
+        .onAppear { applyAlarmAudioOutput() }
+        .onChange(of: viewModel.connectionStatus) { _, newStatus in
+            if newStatus == "Connected" { applyAlarmAudioOutput() }
+        }
+        .onChange(of: alarmAudioOutput) { _, _ in applyAlarmAudioOutput() }
+        .onChange(of: viewModel.alarmFiring) { _, firing in
+            handleAlarmVisibilityChange(firing || viewModel.localAlarmFallbackActive)
+        }
+        .onChange(of: viewModel.localAlarmFallbackActive) { _, fallback in
+            handleAlarmVisibilityChange(viewModel.alarmFiring || fallback)
+        }
+    }
+
+    private var alarmEditorSheet: some View {
+        AlarmEditorView(
+            viewModel: viewModel,
+            voiceMessageViewModel: voiceMessageViewModel,
+            weatherViewModel: weatherViewModel,
+            alarmTime: editorAlarmTime,
+            repeatDays: editorRepeatDays,
+            selectedWakeEffect: editorWakeEffect,
+            alarmType: editorAlarmType,
+            voiceOption: editorVoiceOption,
+            alarmAudioOutput: editorAudioOutput,
+            editingID: editorEditingID
+        )
+        .environmentObject(theme)
     }
 
     private var connectedContent: some View {
@@ -404,11 +413,7 @@ struct SpeakerCard: View {
 
     private var testToneButton: some View {
         Button {
-            if alarmAudioOutput == .deviceSpeaker {
-                viewModel.playSpeakerTestTone()
-            } else {
-                voiceMessageViewModel.playTestTone(frequencyHz: viewModel.testToneFrequency)
-            }
+            viewModel.playSpeakerTestTone()
         } label: {
             Label("Play Test Tone", systemImage: "play.fill")
                 .font(.subheadline.weight(.semibold))
@@ -570,6 +575,16 @@ struct AlarmQuickActionsBar: View {
     }
 }
 
+struct AudioRoutePickerButton: UIViewRepresentable {
+    func makeUIView(context: Context) -> AVRoutePickerView {
+        let picker = AVRoutePickerView()
+        picker.activeTintColor = .systemBlue
+        picker.tintColor = .secondaryLabel
+        return picker
+    }
+    func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
+}
+
 struct AudioRouteCard: View {
     @ObservedObject var viewModel: BluetoothViewModel
     @EnvironmentObject private var theme: AppTheme
@@ -594,21 +609,9 @@ struct AudioRouteCard: View {
                 Spacer()
             }
 
-            if !viewModel.isAwakenAudioRouteActive {
-                Button {
-                    if let url = URL(string: UIApplication.openSettingsURLString) {
-                        UIApplication.shared.open(url)
-                    }
-                } label: {
-                    Label("Open Bluetooth Settings", systemImage: "gear")
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(theme.controlFill)
-                        .cornerRadius(10)
-                }
-                .foregroundColor(theme.textPrimary)
-            }
+            AudioRoutePickerButton()
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
         }
     }
 }
