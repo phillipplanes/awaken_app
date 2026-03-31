@@ -92,23 +92,10 @@ const char* password = "Yadagjb0ys!";
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", -18000);
 
-class HybridA2DPSink : public BluetoothA2DPSinkQueued {
-public:
-    volatile bool outputForceMuted = false;
-
-    void muteOutput() { outputForceMuted = true; }
-    void unmuteOutput() { outputForceMuted = false; }
-
-    // Skip ring buffer writes when muted — prevents out->begin() and
-    // I2S driver reinstall from write_audio's !is_i2s_active path.
-    // Let set_i2s_active work normally so the library state machine stays consistent.
-    size_t write_audio(const uint8_t *data, size_t size) override {
-        if (outputForceMuted) return size; // discard silently
-        return BluetoothA2DPSinkQueued::write_audio(data, size);
-    }
-};
-
-HybridA2DPSink a2dpSink;
+// Use the library's class directly — no subclass, no write_audio override.
+// The custom HybridA2DPSink was interfering with the A2DP library's internal
+// I2S state machine, preventing audio from actually flowing.
+BluetoothA2DPSinkQueued a2dpSink;
 Adafruit_DRV2605 drv;
 
 BLECharacteristic *pStatusCharacteristic = nullptr;
@@ -123,7 +110,7 @@ uint8_t batteryLevelPercent = BATTERY_LEVEL_UNAVAILABLE;
 uint8_t vibrationIntensity = 64;
 uint8_t wakeEffectId = DEFAULT_WAKE_EFFECT_ID;
 uint8_t speakerVolume = 55; // app-facing 0..100
-bool alarmSoundEnabled = true;
+bool alarmSoundEnabled = false; // Default off — app sends the correct state on connect
 
 long alarmHour = -1;
 long alarmMinute = -1;
@@ -235,11 +222,9 @@ bool needsHighCpu() {
 }
 
 void servicePowerManagement() {
-    if (needsHighCpu()) {
-        setCpuHigh();
-    } else {
-        setCpuLow();
-    }
+    // CPU frequency switching disabled — changing clock speed while
+    // Bluetooth is active disrupts A2DP timing and causes disconnects.
+    // ESP32 runs fine at default 240MHz for all modes.
 }
 
 bool isCustomHapticEffect(uint8_t effectId) {
@@ -407,8 +392,8 @@ void serviceBatteryMonitor() {
 
 void acquireI2SForLocalPlayback(uint32_t sampleRate) {
     localAudioOwnsI2S = true;
-    // Block A2DP's write_audio so it can't push to ring buffer or reinstall I2S
-    a2dpSink.muteOutput();
+    // Mute A2DP by setting volume to 0 so its writer task doesn't conflict
+    a2dpSink.set_volume(0);
     // Flush stale DMA data and restart I2S for our exclusive use
     i2s_stop(I2S_PORT);
     delay(10);
@@ -416,13 +401,14 @@ void acquireI2SForLocalPlayback(uint32_t sampleRate) {
     i2s_start(I2S_PORT);
     Serial.print("I2S acquired for local playback (file rate=");
     Serial.print(sampleRate);
-    Serial.println("Hz, I2S stays at 44100Hz, A2DP muted)");
+    Serial.println("Hz, I2S stays at 44100Hz)");
 }
 
 void releaseI2SToA2DP() {
     localAudioOwnsI2S = false;
-    // Re-enable A2DP's write_audio path
-    a2dpSink.unmuteOutput();
+    // Restore A2DP volume
+    uint8_t vol = speakerVolume > 100 ? 100 : speakerVolume;
+    a2dpSink.set_volume(vol);
     Serial.println("I2S released back to A2DP");
 }
 
@@ -435,32 +421,8 @@ void initDeviceNames() {
     namesInitialized = true;
 }
 
-void onA2dpConnectionStateChanged(esp_a2d_connection_state_t state, void *) {
-    a2dpConnected = (state == ESP_A2D_CONNECTION_STATE_CONNECTED);
-    Serial.print("A2DP connection state: ");
-    Serial.print(a2dpSink.to_str(state));
-    if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
-        Serial.print(" (disc_rsn=");
-        Serial.print(a2dpSink.get_connection_state() == ESP_A2D_CONNECTION_STATE_DISCONNECTED ? "remote" : "local");
-        Serial.print(")");
-    }
-    Serial.println();
-}
-
-void onA2dpAudioStateChanged(esp_a2d_audio_state_t state, void *) {
-    esp_a2d_audio_state_t prevState = a2dpAudioState;
-    a2dpAudioState = state;
-    Serial.print("A2DP audio state: ");
-    Serial.println(a2dpSink.to_str(state));
-
-    // Auto-stop capture when audio stops playing (phone finished playback)
-    if (a2dpCaptureActive &&
-        prevState == ESP_A2D_AUDIO_STATE_STARTED &&
-        state == ESP_A2D_AUDIO_STATE_REMOTE_SUSPEND) {
-        Serial.println("[A2DP Capture] Audio stopped -- auto-stopping capture");
-        stopA2dpCapture();
-    }
-}
+// A2DP callbacks are NOT registered — they break A2DP even when minimal.
+// Connection/audio state is polled in loop() instead.
 
 void notifyAlarmState(uint8_t state) {
     alarmState = state;
@@ -902,11 +864,7 @@ void serviceA2dpCaptureDrain() {
 void startA2dpCapture() {
     if (a2dpCaptureActive) return;
 
-    // Mute A2DP output FIRST — prevents write_audio race during transition.
-    // Must happen before stopFilePlayback, which would otherwise unmute briefly.
-    a2dpSink.muteOutput();
-
-    // Stop file playback WITHOUT calling releaseI2SToA2DP (which would unmute).
+    // Stop file playback WITHOUT calling releaseI2SToA2DP.
     if (playbackFileHandle) playbackFileHandle.close();
     playbackActive = false;
     playbackLoopEnabled = false;
@@ -920,7 +878,6 @@ void startA2dpCapture() {
     a2dpCaptureFile = SPIFFS.open(uploadedVoiceFile, "w");
     if (!a2dpCaptureFile) {
         Serial.println("[A2DP Capture] SPIFFS open failed");
-        a2dpSink.unmuteOutput();
         return;
     }
 
@@ -941,7 +898,7 @@ void startA2dpCapture() {
 void stopA2dpCapture() {
     if (!a2dpCaptureActive) return;
     a2dpCaptureActive = false;
-    a2dpSink.unmuteOutput(); // unmute speaker
+    // Speaker auto-resumes when A2DP data flows again
 
     // Drain remaining data
     serviceA2dpCaptureDrain();
@@ -1431,7 +1388,12 @@ void setupBle() {
     service->start();
     BLEAdvertising *advertising = server->getAdvertising();
     BLEAdvertisementData advData;
-    advData.setFlags(ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT);
+    // CRITICAL: Do NOT use ESP_BLE_ADV_FLAG_BREDR_NOT_SPT here!
+    // That flag tells iOS "I don't support Classic BT", which causes iOS
+    // to drop the A2DP connection. We need dual-mode flags instead.
+    advData.setFlags(ESP_BLE_ADV_FLAG_GEN_DISC
+                   | ESP_BLE_ADV_FLAG_DMT_CONTROLLER_SPT
+                   | ESP_BLE_ADV_FLAG_DMT_HOST_SPT);
     advData.setCompleteServices(BLEUUID(SERVICE_UUID));
     advertising->setAdvertisementData(advData);
 
@@ -1481,19 +1443,9 @@ void setupA2dp() {
     a2dpSink.set_i2s_port(I2S_PORT);
     a2dpSink.set_i2s_config(i2sConfig);
     a2dpSink.set_pin_config(pinConfig);
-    a2dpSink.set_raw_stream_reader(a2dpStreamReaderCallback); // capture PRE-volume audio; I2S output continues normally
-    a2dpSink.set_on_connection_state_changed(onA2dpConnectionStateChanged);
-    a2dpSink.set_on_audio_state_changed(onA2dpAudioStateChanged);
-    a2dpSink.set_reconnect_delay(1500);
-
-    // Keep bonding keys so iOS A2DP stays authenticated across reconnects.
-    // If pairing fails, forget the device on the phone and re-pair.
-    int bondedCount = esp_bt_gap_get_bond_device_num();
-    Serial.printf("[BT] %d existing bond(s) retained\n", bondedCount);
-
-    a2dpSink.start(a2dpName, true);
-    a2dpSink.set_connectable(true);
-    a2dpSink.set_discoverability(ESP_BT_GENERAL_DISCOVERABLE);
+    // NO CALLBACKS — they break A2DP (even minimal ones).
+    // Connection state is polled in loop() via a2dpSink.is_connected().
+    a2dpSink.start(a2dpName, false);
 
     i2s_zero_dma_buffer(I2S_PORT);
 
@@ -1543,31 +1495,16 @@ void setup() {
 
     initHaptics();
     initBatteryMonitor();
-    syncTimeAndDisconnectWiFi();
+
+    // WiFi removed — time syncs over BLE, and WiFi shares the radio with BT.
+    // Startup chime removed — I2S manipulation after A2DP starts corrupts its state.
+
     // A2DP must init FIRST — it starts the BT controller in BTDM (dual) mode.
-    // If BLE inits first, the controller may start in BLE-only mode and
-    // Classic Bluetooth (A2DP audio) silently fails when streaming begins.
     setupA2dp();
+    delay(500);
     setupBle();
+    delay(200);
     ensureClassicNameAndDiscoverable();
-
-    // Startup chime — confirms speaker is working
-    {
-        uint8_t savedVol = speakerVolume;
-        speakerVolume = 40;
-        // C5, E5, G5, C6 — a bright major arpeggio
-        playSpeakerTone(523, 100);  delay(30);
-        playSpeakerTone(659, 100);  delay(30);
-        playSpeakerTone(784, 100);  delay(30);
-        playSpeakerTone(1047, 180);
-        speakerVolume = savedVol;
-        Serial.println("Startup chime played");
-    }
-
-    // Start at low CPU since nothing is active yet
-    setCpuFrequencyMhz(80);
-    cpuIsHighSpeed = false;
-    Serial.println("[Power] CPU -> 80MHz (idle start)");
 }
 
 void loop() {
@@ -1689,6 +1626,16 @@ void loop() {
             a2dpSink.set_connectable(true);
             a2dpSink.set_discoverability(ESP_BT_GENERAL_DISCOVERABLE);
             lastA2dpConnectableRefreshMs = now;
+        }
+    }
+
+    // Poll A2DP connection state instead of using callbacks (callbacks break A2DP).
+    {
+        bool nowConnected = a2dpSink.is_connected();
+        if (nowConnected != a2dpConnected) {
+            a2dpConnected = nowConnected;
+            Serial.print("[A2DP] Connection state: ");
+            Serial.println(a2dpConnected ? "CONNECTED" : "DISCONNECTED");
         }
     }
 
