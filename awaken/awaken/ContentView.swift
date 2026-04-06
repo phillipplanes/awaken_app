@@ -4,7 +4,7 @@ struct ContentView: View {
     @StateObject private var viewModel = BluetoothViewModel()
     @StateObject private var weatherViewModel = AlarmWeatherViewModel()
     @StateObject private var voiceMessageViewModel = VoiceMessageViewModel()
-    @State private var alarmAudioOutput: AlarmAudioOutput = .phone
+    @State private var alarmAudioOutput: AlarmAudioOutput = .deviceSpeaker
     @State private var showTestSection = false
     @EnvironmentObject private var theme: AppTheme
     @EnvironmentObject private var appState: AppState

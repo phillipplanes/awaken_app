@@ -83,6 +83,7 @@ struct ConnectedView: View {
 
     private var connectedContent: some View {
         VStack(spacing: 16) {
+            clockWeatherRow
             AlarmVerificationBanner(viewModel: viewModel)
             addAlarmButton
             ScheduledAlarmsListCard(
@@ -99,6 +100,30 @@ struct ConnectedView: View {
                 isConnected: isConnected
             )
             disconnectButton
+        }
+    }
+
+    private var clockWeatherRow: some View {
+        VStack(spacing: 4) {
+            Text(Date.now, style: .time)
+                .font(.system(size: 48, weight: .bold, design: .rounded))
+                .foregroundColor(theme.textPrimary)
+
+            if weatherViewModel.currentAvailable {
+                HStack(spacing: 6) {
+                    Image(systemName: weatherViewModel.currentSymbol)
+                        .font(.subheadline)
+                        .foregroundColor(theme.accent)
+                    Text("\(weatherViewModel.currentTemp), \(weatherViewModel.currentCondition)")
+                        .font(.subheadline)
+                        .foregroundColor(theme.textSecondary)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 4)
+        .onAppear {
+            weatherViewModel.refreshCurrentWeather()
         }
     }
 
@@ -119,7 +144,7 @@ struct ConnectedView: View {
                     endPoint: .bottomTrailing
                 )
             )
-            .foregroundColor(.white)
+            .foregroundColor(theme.accentText)
             .cornerRadius(14)
             .shadow(color: theme.accent.opacity(0.22), radius: 16, x: 0, y: 10)
         }
@@ -139,7 +164,7 @@ struct ConnectedView: View {
     private var connectedToolbar: some ToolbarContent {
         ToolbarItem(placement: .navigationBarLeading) {
             Button { showSettings = true } label: {
-                Image(systemName: "gearshape.fill")
+                Image(systemName: "person.crop.circle")
                     .foregroundColor(theme.textSecondary)
             }
         }
@@ -153,9 +178,9 @@ struct ConnectedView: View {
 
     private func handleAlarmVisibilityChange(_ visible: Bool) {
         if visible {
-            if alarmAudioOutput == .phone {
-                voiceMessageViewModel.playAlarmAudioIfAvailable()
-            }
+            // Always play alarm audio from the phone — if A2DP is connected,
+            // iOS automatically routes it to the Bluetooth speaker.
+            voiceMessageViewModel.playAlarmAudioIfAvailable()
         } else {
             voiceMessageViewModel.stopAlarmAudio()
         }
@@ -545,10 +570,10 @@ struct AlarmQuickActionsBar: View {
                     .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
-                    .background(theme.warmHighlight.opacity(0.35))
+                    .background(theme.warmHighlight)
                     .cornerRadius(12)
             }
-            .foregroundColor(theme.accentDeep)
+            .foregroundColor(theme.accentText)
 
             Button {
                 voiceMessageViewModel.stopAlarmAudio()

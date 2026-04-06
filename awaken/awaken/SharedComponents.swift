@@ -9,29 +9,15 @@ struct HapticEffect: Identifiable {
 }
 
 let wakeEffects: [HapticEffect] = [
-    HapticEffect(id: 1,   name: "Big Energy",   icon: "bolt.fill"),
-    HapticEffect(id: 16,  name: "Wake Boost",   icon: "waveform"),
-    HapticEffect(id: 47,  name: "Calmness",     icon: "wind"),
-    HapticEffect(id: 52,  name: "Heartbeat",    icon: "heart.fill"),
-    HapticEffect(id: 64,  name: "Momentum",     icon: "chart.line.uptrend.xyaxis"),
-    HapticEffect(id: 118, name: "Sunrise Flow", icon: "sunrise.fill"),
-    HapticEffect(id: 124, name: "Sine Ramp",    icon: "waveform.path"),
+    HapticEffect(id: 1, name: "Light",  icon: "wind"),
+    HapticEffect(id: 2, name: "Medium", icon: "waveform"),
+    HapticEffect(id: 3, name: "Heavy",  icon: "bolt.fill"),
 ]
 
 let testEffects: [HapticEffect] = [
-    HapticEffect(id: 1,   name: "Big Energy",   icon: "bolt.fill"),
-    HapticEffect(id: 10,  name: "Double Spark", icon: "bolt.horizontal.fill"),
-    HapticEffect(id: 12,  name: "Triple Spark", icon: "bolt.horizontal.fill"),
-    HapticEffect(id: 14,  name: "Soft Landing", icon: "hand.tap"),
-    HapticEffect(id: 16,  name: "Wake Boost",   icon: "waveform"),
-    HapticEffect(id: 27,  name: "Quick Charge", icon: "waveform"),
-    HapticEffect(id: 47,  name: "Calmness",     icon: "wind"),
-    HapticEffect(id: 52,  name: "Power Pulse",  icon: "heart.fill"),
-    HapticEffect(id: 58,  name: "Concentration", icon: "metronome"),
-    HapticEffect(id: 64,  name: "Momentum",     icon: "chart.line.uptrend.xyaxis"),
-    HapticEffect(id: 70,  name: "Wind Down",    icon: "chart.line.downtrend.xyaxis"),
-    HapticEffect(id: 118, name: "Sunrise Flow", icon: "sunrise.fill"),
-    HapticEffect(id: 124, name: "Sine Ramp",    icon: "waveform.path"),
+    HapticEffect(id: 1, name: "Light",  icon: "wind"),
+    HapticEffect(id: 2, name: "Medium", icon: "waveform"),
+    HapticEffect(id: 3, name: "Heavy",  icon: "bolt.fill"),
 ]
 
 // MARK: - Alarm Audio Output

@@ -18,14 +18,15 @@ struct OpenAIService {
 
         let userProfile = UserProfile.load()
         var systemLines = [
-            "You write short alarm wake-up scripts.",
+            "You write short wake-up messages like a warm, encouraging friend talking to someone who just woke up.",
+            "Sound natural and conversational — the way a real person talks, not a greeting card or motivational poster.",
+            "Use casual language, contractions, and a relaxed tone. It's okay to be a little playful or witty.",
             "Keep it to 1-2 sentences, 12-28 words total.",
-            "Be inspirational, practical, and positive.",
-            "No hashtags, no emojis, no quotes, no lists."
+            "No hashtags, no emojis, no quotes, no lists, no clichés like 'seize the day' or 'rise and shine'."
         ]
         if !userProfile.promptContext.isEmpty {
             systemLines.append("Personal context: \(userProfile.promptContext)")
-            systemLines.append("Use their name occasionally. Subtly reference their motivations or stressors when it fits naturally.")
+            systemLines.append("Use their name sometimes. Weave in their motivations or stressors naturally, like a friend who knows them well.")
         }
         let systemPrompt = systemLines.joined(separator: "\n")
 
@@ -35,7 +36,7 @@ struct OpenAIService {
         Alarm time: \(alarmTimeText)
         Weather context: \(weatherSummary)
 
-        Write one motivational wake-up message that lightly references the weather when useful.
+        Write one casual, human-sounding wake-up message. Mention the weather if it's relevant but don't force it.
         """
 
         let requestBody = ChatCompletionsRequest(

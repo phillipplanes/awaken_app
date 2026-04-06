@@ -75,10 +75,17 @@ static constexpr int I2S_LRCLK_PIN = 27;
 static constexpr int I2S_DOUT_PIN = 25; // ESP32 -> MAX98357A DIN
 static constexpr uint32_t DEFAULT_RINGTONE_SAMPLE_RATE = 8000;
 static constexpr uint32_t UPLOADED_VOICE_SAMPLE_RATE = 24000;
-static constexpr uint8_t DEFAULT_WAKE_EFFECT_ID = 1;
-static constexpr uint8_t CUSTOM_EFFECT_SINE_RAMP = 124;
-static constexpr unsigned long CUSTOM_HAPTIC_CYCLE_MS = 60000;
-static constexpr unsigned long CUSTOM_HAPTIC_UPDATE_INTERVAL_MS = 40;
+static constexpr uint8_t DEFAULT_WAKE_EFFECT_ID = 2; // Medium
+// Vibration mode IDs: 1=Light, 2=Medium, 3=Heavy — all ramp up
+static constexpr uint8_t HAPTIC_MODE_LIGHT  = 1;
+static constexpr uint8_t HAPTIC_MODE_MEDIUM = 2;
+static constexpr uint8_t HAPTIC_MODE_HEAVY  = 3;
+// Ramp duration: 3 seconds to reach max intensity and continuous vibration
+static constexpr unsigned long RAMP_MS = 3000;
+// Pulse period: starts at 1000ms, shrinks toward continuous over 3 iterations
+static constexpr unsigned long PULSE_MS_START = 1000;  // 1 pulse/sec initially
+static constexpr unsigned long PULSE_MS_END   = 80;    // near-continuous
+static constexpr unsigned long CUSTOM_HAPTIC_UPDATE_INTERVAL_MS = 30;
 
 static constexpr const char *BLE_NAME_PREFIX = "AWAKEN-manage";
 static constexpr const char *A2DP_NAME_PREFIX = "AWAKEN-audio";
@@ -110,7 +117,7 @@ uint8_t batteryLevelPercent = BATTERY_LEVEL_UNAVAILABLE;
 uint8_t vibrationIntensity = 64;
 uint8_t wakeEffectId = DEFAULT_WAKE_EFFECT_ID;
 uint8_t speakerVolume = 55; // app-facing 0..100
-bool alarmSoundEnabled = false; // Default off — app sends the correct state on connect
+bool alarmSoundEnabled = true;
 
 long alarmHour = -1;
 long alarmMinute = -1;
@@ -138,6 +145,10 @@ File playbackFileHandle;
 bool playbackLoopEnabled = false;
 bool playbackActive = false;
 uint32_t playbackInputRate = 44100;  // sample rate of the file being played
+// Alarm volume ramp: starts at ~20% and increases each repeat until max
+static constexpr uint8_t ALARM_VOLUME_START_PERCENT = 50;
+static constexpr uint8_t ALARM_VOLUME_STEP_PERCENT  = 20; // +20% per repeat
+uint8_t alarmPlaybackRepeatCount = 0;
 // Gap between alarm audio loops (escalating urgency)
 bool playbackInGap = false;
 unsigned long playbackGapStartMs = 0;
@@ -228,7 +239,9 @@ void servicePowerManagement() {
 }
 
 bool isCustomHapticEffect(uint8_t effectId) {
-    return effectId == CUSTOM_EFFECT_SINE_RAMP;
+    return effectId == HAPTIC_MODE_LIGHT ||
+           effectId == HAPTIC_MODE_MEDIUM ||
+           effectId == HAPTIC_MODE_HEAVY;
 }
 
 void ensureDrvMode(uint8_t mode) {
@@ -290,17 +303,58 @@ bool serviceCustomHapticPattern() {
     }
 
     unsigned long elapsed = now - customHapticStartMs;
-    if (!customHapticLoop && elapsed >= CUSTOM_HAPTIC_CYCLE_MS) {
+
+    // Max intensity per mode: Light 50%, Medium 75%, Heavy 100%
+    float maxIntensity;
+    switch (wakeEffectId) {
+        case HAPTIC_MODE_LIGHT:  maxIntensity = 0.50f; break;
+        case HAPTIC_MODE_HEAVY:  maxIntensity = 1.00f; break;
+        default:                 maxIntensity = 0.75f; break;
+    }
+
+    // For non-looping (test preview), run 1 second then stop
+    if (!customHapticLoop && elapsed >= PULSE_MS_START) {
         stopCustomHapticPattern();
         return false;
     }
-    if (customHapticLoop) {
-        elapsed %= CUSTOM_HAPTIC_CYCLE_MS;
+
+    // Progress 0..1 over the ramp period
+    float progress = (elapsed >= RAMP_MS) ? 1.0f : (float)elapsed / (float)RAMP_MS;
+
+    // After ramp complete: switch to library effect for maximum motor output
+    // (DRV2605 library effects use overdrive/braking, much stronger than RTP)
+    if (progress >= 1.0f) {
+        // Pick library effect by intensity mode
+        uint8_t libraryEffect;
+        switch (wakeEffectId) {
+            case HAPTIC_MODE_LIGHT:  libraryEffect = 10; break; // Double Click - 60%
+            case HAPTIC_MODE_HEAVY:  libraryEffect = 1;  break; // Strong Click - 100%
+            default:                 libraryEffect = 4;  break; // Sharp Click - 100%
+        }
+        if (now - customHapticLastUpdateMs > 400) {
+            playStandardHapticEffect(libraryEffect);
+            customHapticLastUpdateMs = now;
+        }
+        return true;
     }
 
-    float phase = ((2.0f * M_PI * elapsed) / CUSTOM_HAPTIC_CYCLE_MS) - (M_PI / 2.0f);
-    float normalized = (sinf(phase) + 1.0f) * 0.5f;
-    uint8_t intensity = (uint8_t)roundf(normalized * 127.0f);
+    // Envelope: ramps from 0.15 to 1.0
+    float envelope = 0.15f + 0.85f * progress;
+
+    // Pulse period: starts at 1s, shrinks to near-continuous
+    float curPulseMs = PULSE_MS_START - (PULSE_MS_START - PULSE_MS_END) * progress;
+
+    // Once nearly continuous, just hold steady
+    float pulse;
+    if (curPulseMs <= PULSE_MS_END + 10) {
+        pulse = 1.0f;
+    } else {
+        unsigned long pulseMsInt = (unsigned long)curPulseMs;
+        float pulsePhase = (2.0f * M_PI * (elapsed % pulseMsInt)) / curPulseMs;
+        pulse = (sinf(pulsePhase - (M_PI / 2.0f)) + 1.0f) * 0.5f; // 0..1
+    }
+
+    uint8_t intensity = (uint8_t)roundf(pulse * envelope * maxIntensity * 127.0f);
 
     ensureDrvMode(DRV2605_MODE_REALTIME);
     drv.setRealtimeValue(intensity);
@@ -575,7 +629,16 @@ void serviceFilePlayback() {
     static int16_t monoBuf[256];
     static int16_t stereoBuf[512];
     size_t bytesWritten;
-    int16_t amplitude = (int16_t)((int32_t)32767 * speakerVolume / 100);
+    // During alarm, ramp volume from soft to loud across repeats
+    uint8_t effectiveVolume = speakerVolume;
+    if (alarmFiring && playbackLoopEnabled) {
+        uint8_t rampedPercent = ALARM_VOLUME_START_PERCENT
+                              + (uint16_t)alarmPlaybackRepeatCount * ALARM_VOLUME_STEP_PERCENT;
+        if (rampedPercent > 100) rampedPercent = 100;
+        effectiveVolume = (uint8_t)((uint16_t)speakerVolume * rampedPercent / 100);
+        if (effectiveVolume < 1) effectiveVolume = 1;
+    }
+    int16_t amplitude = (int16_t)((int32_t)32767 * effectiveVolume / 100);
     int totalFramesWritten = 0;
     const int targetFrames = playbackInputRate / 5; // 200ms worth of frames
 
@@ -583,11 +646,17 @@ void serviceFilePlayback() {
         size_t bytesRead = playbackFileHandle.read((uint8_t*)monoBuf, sizeof(monoBuf));
         if (bytesRead == 0) {
             if (playbackLoopEnabled && alarmFiring) {
+                // Ramp volume for next repeat
+                alarmPlaybackRepeatCount++;
+                uint8_t rampedPercent = ALARM_VOLUME_START_PERCENT
+                                      + (uint16_t)alarmPlaybackRepeatCount * ALARM_VOLUME_STEP_PERCENT;
+                if (rampedPercent > 100) rampedPercent = 100;
+                Serial.printf("[Alarm] Repeat #%u, volume %u%%\n",
+                              alarmPlaybackRepeatCount, rampedPercent);
                 // Enter gap before replaying — silence the DMA buffers
                 i2s_zero_dma_buffer(I2S_PORT);
                 playbackInGap = true;
                 playbackGapStartMs = millis();
-                Serial.printf("[Alarm] Loop gap started (%lu ms)\n", alarmLoopGapMs());
                 return;
             }
             stopFilePlayback();
@@ -734,6 +803,7 @@ void triggerAlarm() {
     alarmIsTriggered = true;
     alarmFiring = true;
     alarmTriggeredAtMs = millis();
+    alarmPlaybackRepeatCount = 0;
     lastAlarmHapticPulseMs = 0;
     lastAlarmFallbackToneMs = 0;
     if (isCustomHapticEffect(wakeEffectId)) {
@@ -1033,7 +1103,8 @@ class EffectCallback: public BLECharacteristicCallbacks {
         uint8_t effectId = (uint8_t)value[0];
         if (isCustomHapticEffect(effectId)) {
             startCustomHapticPattern(false);
-            Serial.println("Playing custom sine ramp effect");
+            Serial.print("Playing vibration mode: ");
+            Serial.println(effectId);
         } else if (effectId >= 1 && effectId <= 123) {
             playStandardHapticEffect(effectId);
             Serial.print("Playing effect: ");
@@ -1317,6 +1388,21 @@ class TimeSyncCallback: public BLECharacteristicCallbacks {
 void setupBle() {
     BLEDevice::init(bleName);
     BLEDevice::setMTU(517);  // Allow large BLE writes (voice upload packets up to 512 bytes)
+
+    // Clear BLE bonds on boot so iOS does a fresh GATT discovery after reflash.
+    // This is separate from Classic BT bonds (A2DP pairing is unaffected).
+    int bleBondCount = esp_ble_get_bond_device_num();
+    if (bleBondCount > 0) {
+        esp_ble_bond_dev_t *devList = (esp_ble_bond_dev_t *)malloc(sizeof(esp_ble_bond_dev_t) * bleBondCount);
+        if (devList) {
+            esp_ble_get_bond_device_list(&bleBondCount, devList);
+            for (int i = 0; i < bleBondCount; i++) {
+                esp_ble_remove_bond_device(devList[i].bd_addr);
+            }
+            free(devList);
+            Serial.printf("[BLE] Cleared %d stale BLE bond(s)\n", bleBondCount);
+        }
+    }
     BLEServer *server = BLEDevice::createServer();
     server->setCallbacks(new MyServerCallbacks());
 
@@ -1578,7 +1664,10 @@ void loop() {
                 }
             }
         } else if (alarmSoundEnabled) {
-            if (!playbackActive) {
+            // When A2DP is connected, the phone streams alarm audio over Bluetooth —
+            // don't play local audio (it would stomp on A2DP I2S).
+            // Only use local playback when the device is standalone (no A2DP).
+            if (!a2dpConnected && !playbackActive) {
                 if (uploadedVoiceReady) {
                     startFilePlayback(uploadedVoiceFile, true, uploadedVoiceSampleRate);
                 } else if (!startFilePlayback(defaultRingtoneFile, true, DEFAULT_RINGTONE_SAMPLE_RATE)) {

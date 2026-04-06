@@ -123,11 +123,6 @@ final class VoiceMessageViewModel: NSObject, ObservableObject, AVAudioPlayerDele
         }
         logger.info("playAlarmAudioIfAvailable: starting alarm audio")
         isPlayingAlarm = true
-        // Force audio to phone speaker only — do NOT route over A2DP,
-        // otherwise the same audio plays on both phone and BT speaker with a delay (echo).
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, options: [])
-        try? session.overrideOutputAudioPort(.speaker)
         playAudioFile(url: audioURL, loops: false)
     }
 
@@ -153,10 +148,6 @@ final class VoiceMessageViewModel: NSObject, ObservableObject, AVAudioPlayerDele
         audioPlayer?.stop()
         audioPlayer = nil
         isPlayingAlarm = false
-        // Restore A2DP routing after alarm audio stops
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, options: [.allowBluetoothA2DP])
-        try? session.overrideOutputAudioPort(.none)
     }
 
     // MARK: - Microphone Recording
@@ -285,10 +276,6 @@ final class VoiceMessageViewModel: NSObject, ObservableObject, AVAudioPlayerDele
             let work = DispatchWorkItem { [weak self] in
                 guard let self, self.isPlayingAlarm, let url = self.audioURL else { return }
                 self.logger.info("Replaying alarm audio")
-                // Re-force phone speaker on each replay — session may have been reset
-                let session = AVAudioSession.sharedInstance()
-                try? session.setCategory(.playback, options: [])
-                try? session.overrideOutputAudioPort(.speaker)
                 self.playAudioFile(url: url, loops: false)
             }
             self.alarmReplayWork = work

@@ -10,15 +10,68 @@ final class AlarmWeatherViewModel: NSObject, ObservableObject {
     @Published private(set) var detailText = "Allow location to see weather at alarm time."
     @Published private(set) var symbolName = "cloud.sun"
 
+    // Current weather (for main screen)
+    @Published private(set) var currentTemp: String = "--"
+    @Published private(set) var currentCondition: String = ""
+    @Published private(set) var currentSymbol: String = "cloud.sun"
+    @Published private(set) var currentAvailable = false
+
     private let locationManager = CLLocationManager()
     private var currentLocation: CLLocation?
     private var pendingAlarmTime: Date?
     private var refreshTask: Task<Void, Never>?
+    private var currentWeatherTask: Task<Void, Never>?
 
     override init() {
         super.init()
         locationManager.delegate = self
         locationManager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
+    }
+
+    func refreshCurrentWeather() {
+        currentWeatherTask?.cancel()
+        currentWeatherTask = Task { [weak self] in
+            await self?.fetchCurrentWeather()
+        }
+    }
+
+    private func fetchCurrentWeather() async {
+        let status = locationManager.authorizationStatus
+        guard status == .authorizedAlways || status == .authorizedWhenInUse else {
+            if status == .notDetermined {
+                locationManager.requestWhenInUseAuthorization()
+            }
+            return
+        }
+
+        guard let location = currentLocation ?? locationManager.location else {
+            locationManager.requestLocation()
+            return
+        }
+
+        guard var components = URLComponents(string: "https://api.open-meteo.com/v1/forecast") else { return }
+        components.queryItems = [
+            URLQueryItem(name: "latitude", value: String(location.coordinate.latitude)),
+            URLQueryItem(name: "longitude", value: String(location.coordinate.longitude)),
+            URLQueryItem(name: "current", value: "temperature_2m,weather_code"),
+            URLQueryItem(name: "temperature_unit", value: "fahrenheit"),
+            URLQueryItem(name: "timezone", value: "auto"),
+            URLQueryItem(name: "forecast_days", value: "1")
+        ]
+        guard let url = components.url else { return }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else { return }
+            let decoded = try JSONDecoder().decode(CurrentWeatherResponse.self, from: data)
+            let tempF = Int(decoded.current.temperature2m.rounded())
+            currentTemp = "\(tempF)°F"
+            currentCondition = conditionText(for: decoded.current.weatherCode)
+            currentSymbol = symbolName(for: decoded.current.weatherCode)
+            currentAvailable = true
+        } catch {
+            // Silently fail — current weather is non-critical
+        }
     }
 
     func scheduleRefresh(for alarmTime: Date) {
@@ -246,6 +299,10 @@ extension AlarmWeatherViewModel: CLLocationManagerDelegate {
 
             currentLocation = location
 
+            if !currentAvailable {
+                await fetchCurrentWeather()
+            }
+
             guard let pendingAlarmTime else { return }
             await fetchForecast(for: pendingAlarmTime, location: location)
         }
@@ -259,6 +316,20 @@ extension AlarmWeatherViewModel: CLLocationManagerDelegate {
                 symbol: "location.slash"
             )
         }
+    }
+}
+
+private struct CurrentWeatherResponse: Decodable {
+    let current: CurrentWeatherData
+}
+
+private struct CurrentWeatherData: Decodable {
+    let temperature2m: Double
+    let weatherCode: Int
+
+    enum CodingKeys: String, CodingKey {
+        case temperature2m = "temperature_2m"
+        case weatherCode = "weather_code"
     }
 }
 

@@ -147,7 +147,7 @@ struct OnboardingView: View {
             } label: {
                 Text("Get Started")
                     .font(.headline)
-                    .foregroundColor(.white)
+                    .foregroundColor(theme.accentText)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
                     .background(stressors.isEmpty ? theme.accent.opacity(0.4) : theme.accent)
@@ -192,7 +192,7 @@ struct OnboardingView: View {
         } label: {
             Text("Continue")
                 .font(.headline)
-                .foregroundColor(.white)
+                .foregroundColor(theme.accentText)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 16)
                 .background(disabled ? theme.accent.opacity(0.4) : theme.accent)

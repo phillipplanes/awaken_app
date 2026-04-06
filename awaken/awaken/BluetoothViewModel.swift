@@ -3,6 +3,7 @@ import Combine
 import CoreBluetooth
 import AVFAudio
 import AVFoundation
+import UIKit
 
 // BLE UUIDs — must match ESP32 firmware
 let ALARM_SERVICE_UUID = CBUUID(string: "4fafc201-1fb5-459e-8fcc-c5c9c331914b")
@@ -986,7 +987,11 @@ extension BluetoothViewModel: CBPeripheralDelegate {
                 self.alarmFiring = firing
                 if firing {
                     self.localAlarmFallbackActive = false
-                    if !self.alarmSoundEnabled {
+                    // Only fire notification when app is backgrounded — in foreground,
+                    // the alarm UI and audio are handled by ConnectedView directly.
+                    // The notification sound was causing a second staggered audio instance.
+                    if !self.alarmSoundEnabled,
+                       UIApplication.shared.applicationState != .active {
                         AlarmNotificationManager.shared.fireImmediateAlarmNotification()
                     }
                 }

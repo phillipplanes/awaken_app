@@ -212,7 +212,7 @@ struct AlarmEditorView: View {
     }
 
     private var editorVoiceButtons: some View {
-        HStack(spacing: 10) {
+        VStack(spacing: 10) {
             Button {
                 let weather = "\(weatherViewModel.forecastText). \(weatherViewModel.detailText)"
                 Task {
@@ -227,7 +227,7 @@ struct AlarmEditorView: View {
                 Label("AI Generate", systemImage: "wand.and.stars")
                     .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, 12)
                     .background(theme.controlFill)
                     .cornerRadius(10)
             }
@@ -240,7 +240,7 @@ struct AlarmEditorView: View {
                     Label("Stop (\(voiceMessageViewModel.recordingTimeRemaining)s)", systemImage: "stop.circle.fill")
                         .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
+                        .padding(.vertical, 12)
                         .background(Color.red.opacity(0.2))
                         .cornerRadius(10)
                 }
@@ -252,7 +252,7 @@ struct AlarmEditorView: View {
                     Label("Record", systemImage: "mic.circle.fill")
                         .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
+                        .padding(.vertical, 12)
                         .background(theme.controlFill)
                         .cornerRadius(10)
                 }
@@ -265,7 +265,7 @@ struct AlarmEditorView: View {
                 Label("Play", systemImage: "play.fill")
                     .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, 12)
                     .background(theme.controlFill)
                     .cornerRadius(10)
             }
@@ -313,7 +313,7 @@ struct AlarmEditorView: View {
                     endPoint: .bottomTrailing
                 )
             )
-            .foregroundColor(.white)
+            .foregroundColor(theme.accentText)
             .cornerRadius(14)
             .shadow(color: theme.accent.opacity(0.22), radius: 16, x: 0, y: 10)
         }
