@@ -92,13 +92,6 @@ struct ConnectedView: View {
                 onEdit: { alarm in openEditor(for: alarm) }
             )
             AudioRouteCard(viewModel: viewModel)
-            DiagnosticsToolsCard(
-                viewModel: viewModel,
-                voiceMessageViewModel: voiceMessageViewModel,
-                alarmAudioOutput: alarmAudioOutput,
-                showTestSection: $showTestSection,
-                isConnected: isConnected
-            )
             disconnectButton
         }
     }

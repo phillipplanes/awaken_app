@@ -21,20 +21,20 @@ class AppTheme: ObservableObject {
     var isDark: Bool { mode == .dark }
 
     // MARK: - Core palette
-    // Dark: royal blue base with white + gold/yellow accents
-    // Light: unchanged
+    // Dark: royal blue base with white + gold accents
+    // Light: navy blue accents on warm paper
 
     var accent: Color {
-        isDark ? Color(red: 0.85, green: 0.68, blue: 0.20) : Color(red: 0.35, green: 0.60, blue: 0.54)
+        isDark ? Color(red: 0.85, green: 0.68, blue: 0.20) : Color(red: 0.15, green: 0.25, blue: 0.55)
     }
     var accentDeep: Color {
-        isDark ? Color(red: 0.72, green: 0.55, blue: 0.12) : Color(red: 0.24, green: 0.46, blue: 0.41)
+        isDark ? Color(red: 0.72, green: 0.55, blue: 0.12) : Color(red: 0.10, green: 0.18, blue: 0.42)
     }
     var accentText: Color {
         isDark ? Color(red: 0.06, green: 0.08, blue: 0.18) : Color.white
     }
     var accentSoft: Color {
-        isDark ? Color(red: 0.12, green: 0.18, blue: 0.40) : Color(red: 0.84, green: 0.90, blue: 0.87)
+        isDark ? Color(red: 0.12, green: 0.18, blue: 0.40) : Color(red: 0.85, green: 0.88, blue: 0.95)
     }
     var warmBase: Color {
         isDark ? Color(red: 0.06, green: 0.08, blue: 0.18) : Color(red: 0.96, green: 0.95, blue: 0.93)
@@ -55,18 +55,18 @@ class AppTheme: ObservableObject {
         isDark ? Color(red: 0.10, green: 0.14, blue: 0.30) : Color(red: 0.93, green: 0.92, blue: 0.89)
     }
     var textPrimary: Color {
-        isDark ? Color.white : Color(red: 0.26, green: 0.31, blue: 0.29)
+        isDark ? Color.white : Color(red: 0.12, green: 0.14, blue: 0.22)
     }
     var textSecondary: Color {
-        isDark ? Color(red: 0.70, green: 0.75, blue: 0.90) : Color(red: 0.45, green: 0.50, blue: 0.47)
+        isDark ? Color(red: 0.70, green: 0.75, blue: 0.90) : Color(red: 0.35, green: 0.40, blue: 0.52)
     }
     var successTint: Color {
-        isDark ? Color(red: 0.40, green: 0.80, blue: 0.50) : Color(red: 0.43, green: 0.63, blue: 0.54)
+        isDark ? Color(red: 0.40, green: 0.80, blue: 0.50) : Color(red: 0.20, green: 0.55, blue: 0.40)
     }
     var cautionTint: Color {
-        isDark ? Color(red: 0.88, green: 0.70, blue: 0.18) : Color(red: 0.79, green: 0.57, blue: 0.40)
+        isDark ? Color(red: 0.88, green: 0.70, blue: 0.18) : Color(red: 0.75, green: 0.55, blue: 0.20)
     }
     var dangerTint: Color {
-        isDark ? Color(red: 0.90, green: 0.35, blue: 0.35) : Color(red: 0.69, green: 0.41, blue: 0.40)
+        isDark ? Color(red: 0.90, green: 0.35, blue: 0.35) : Color(red: 0.75, green: 0.30, blue: 0.30)
     }
 }

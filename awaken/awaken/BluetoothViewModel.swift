@@ -51,7 +51,7 @@ class BluetoothViewModel: NSObject, ObservableObject {
     private var pendingAlarmDisplayTime: String?
     private var userDisconnectRequested: Bool = false
     private var reconnectAttempts: Int = 0
-    private let maxReconnectAttempts: Int = 3
+    private let maxReconnectAttempts: Int = 10
     private var scanRestartTimer: Timer?
 
     // MARK: - Published
@@ -769,8 +769,8 @@ extension BluetoothViewModel: CBCentralManagerDelegate {
                 existing.discoverServices([ALARM_SERVICE_UUID])
             }
             // Queue a background reconnection to the last-known peripheral.
-            // CoreBluetooth will connect as soon as the ESP32 advertises again.
-            // We do NOT set alarmClockPeripheral here so scanning continues normally.
+            // Also set a timeout: if it doesn't connect in 5s (e.g. bonds were
+            // cleared on device reboot), cancel and let scanning take over.
             if alarmClockPeripheral == nil,
                let savedUUID = UserDefaults.standard.string(forKey: Self.savedPeripheralKey),
                let uuid = UUID(uuidString: savedUUID) {
@@ -779,6 +779,14 @@ extension BluetoothViewModel: CBCentralManagerDelegate {
                     print("[BLE] Queuing reconnect to saved peripheral \(uuid)")
                     peripheral.delegate = self
                     central.connect(peripheral, options: nil)
+                    // Cancel stale reconnect if it hasn't connected after 5s
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+                        guard let self = self else { return }
+                        if peripheral.state != .connected && self.alarmClockPeripheral == nil {
+                            print("[BLE] Saved peripheral reconnect timed out, cancelling")
+                            central.cancelPeripheralConnection(peripheral)
+                        }
+                    }
                 }
             }
             startScanning()
@@ -793,8 +801,8 @@ extension BluetoothViewModel: CBCentralManagerDelegate {
             discoveredPeripherals.append(peripheral)
         }
 
-        // Auto-connect: if we find exactly one device advertising our service, connect immediately
-        if alarmClockPeripheral == nil || alarmClockPeripheral?.state == .disconnected {
+        // Auto-connect: connect to any device advertising our service unless already connected
+        if alarmClockPeripheral?.state != .connected {
             connect(to: peripheral)
         }
     }
@@ -850,14 +858,18 @@ extension BluetoothViewModel: CBCentralManagerDelegate {
         scheduledAlarmDisplayTime = nil
         clearLocalAlarmFallback()
 
-        if !userDisconnectRequested && reconnectAttempts < maxReconnectAttempts {
+        if !userDisconnectRequested {
             reconnectAttempts += 1
             connectionStatus = "Reconnecting... (\(reconnectAttempts))"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            // Queue a direct reconnect to the known peripheral
+            let delay = min(Double(reconnectAttempts) * 0.8, 5.0)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 self.alarmClockPeripheral = peripheral
                 self.alarmClockPeripheral?.delegate = self
                 central.connect(peripheral, options: nil)
             }
+            // Also scan in parallel — the device may have a new identity after reboot/reflash
+            startScanning()
             return
         }
 
